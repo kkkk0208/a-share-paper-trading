@@ -14,9 +14,98 @@
 
 - Create: `a_stock_enrichment.py` — 数据源适配、缓存、聚合和纯摘要函数。
 - Create: `tests/test_a_stock_enrichment.py` — 无网络单元测试。
+- Create: `sw_component_fallback.py` — 申万成分主源、缓存和分类历史重建三级降级。
+- Create: `tests/test_sw_component_fallback.py` — 申万降级链无网络单元测试。
 - Modify: `generate_600601_report.py` — 解析腾讯 PE/PB、调用增强模块、保存原始 JSON、渲染新章节。
 - Modify: `test_600601_outputs.ps1` — 验证新章节及降级语义。
 - Keep unchanged: `run_600601_automation.ps1` — baostock 缺失属于增强降级，不加入强制依赖预检。
+
+## Task 0：为申万成分建立三级降级
+
+**Files:**
+- Create: `sw_component_fallback.py`
+- Create: `tests/test_sw_component_fallback.py`
+- Modify: `generate_600601_report.py`
+
+- [ ] **Step 1: 写主源缓存与估算权重的失败测试**
+
+```python
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from sw_component_fallback import get_sw_components
+
+
+class SwComponentFallbackTests(unittest.TestCase):
+    def test_primary_success_is_cached(self):
+        rows = [{"code": "000001", "name": "平安银行", "weight": 60.0},
+                {"code": "002142", "name": "宁波银行", "weight": 40.0}]
+        with TemporaryDirectory() as temp:
+            out = get_sw_components("801780", "2026-09-17", {}, Path(temp), primary=lambda code: rows)
+            self.assertEqual(out["source"], "sw_primary")
+            self.assertEqual(out["rows"], rows)
+            self.assertTrue((Path(temp) / "components_801780.json").exists())
+
+    def test_primary_failure_uses_recent_cache(self):
+        rows = [{"code": "000001", "name": "平安银行", "weight": 100.0}]
+        with TemporaryDirectory() as temp:
+            cache = Path(temp)
+            get_sw_components("801780", "2026-09-17", {}, cache, primary=lambda code: rows)
+            out = get_sw_components("801780", "2026-09-18", {}, cache,
+                                    primary=lambda code: (_ for _ in ()).throw(RuntimeError("offline")))
+            self.assertEqual(out["source"], "sw_cache")
+            self.assertEqual(out["rows"], rows)
+
+    def test_history_fallback_uses_float_cap_weights(self):
+        classification = [{"code": "000001", "l1_code": "480000"},
+                          {"code": "002142", "l1_code": "480000"}]
+        spot = {"000001": {"name": "平安银行", "float_cap_yi": 300.0},
+                "002142": {"name": "宁波银行", "float_cap_yi": 100.0}}
+        with TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / "index_l1_map.json").write_text('{"801780":"480000"}', encoding="utf-8")
+            out = get_sw_components("801780", "2026-09-17", spot, cache,
+                                    primary=lambda code: (_ for _ in ()).throw(RuntimeError("offline")),
+                                    classification_provider=lambda as_of: classification)
+            self.assertEqual(out["source"], "estimated_float_cap_weight")
+            self.assertEqual([row["weight"] for row in out["rows"]], [75.0, 25.0])
+
+
+if __name__ == "__main__":
+    unittest.main()
+```
+
+- [ ] **Step 2: 运行测试并确认模块不存在**
+
+```powershell
+C:\Users\15369\Documents\Codex\600601_automation_env\Scripts\python.exe -m unittest tests.test_sw_component_fallback -v
+```
+
+Expected: `ModuleNotFoundError: No module named 'sw_component_fallback'`。
+
+- [ ] **Step 3: 实现三级降级模块**
+
+`get_sw_components(index_code, as_of, spot_by_code, cache_dir, primary=None, classification_provider=None)` 必须：先调用主源并校验 `code/name/weight`；成功时原子写入 `components_801xxx.json`；失败时读取不超过 30 天的缓存；没有缓存时读取 `index_l1_map.json` 与当前分类，按 `float_cap_yi / 行业流通市值合计 × 100` 计算权重并把 source 标为 `estimated_float_cap_weight`。
+
+生产 `primary` 适配 `ak.index_component_sw()` 的中文列，分类 provider 调用 `ak.stock_industry_clf_hist_sw()`，取每只股票不晚于 `as_of` 的最后一条记录，并把行业代码前两位规范成 `XX0000`。模块导入 `truststore` 后执行 `truststore.inject_into_ssl()`，禁止 `verify=False`。
+
+- [ ] **Step 4: 运行测试并确认三级降级通过**
+
+Expected: 3 tests, 0 failures。
+
+- [ ] **Step 5: 在报告生成器中替换单次申万调用**
+
+将 `ak.index_component_sw(symbol=industry["code"])` 替换为 `get_sw_components()`；后续评分读取统一的 `code/name/weight`。报告来源分别标注“申万官方成分”“最近成功缓存（日期）”或“申万分类历史 + 腾讯流通市值估算权重”。缓存/估算成功不加入 `market["errors"]`；三级均失败才保留现有错误记录。
+
+- [ ] **Step 6: 安装并验证 Windows 系统证书桥接**
+
+```powershell
+C:\Users\15369\Documents\Codex\600601_automation_env\Scripts\python.exe -m pip install truststore
+C:\Users\15369\Documents\Codex\600601_automation_env\Scripts\python.exe -c "import truststore; truststore.inject_into_ssl(); import akshare as ak; print(len(ak.stock_industry_clf_hist_sw()))"
+```
+
+Expected: 输出大于 12,000 的记录数；不出现 TLS 证书错误。
 
 ## Task 1：建立纯计算接口的失败测试
 
