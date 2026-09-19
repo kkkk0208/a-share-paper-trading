@@ -14,6 +14,34 @@ ALLOWED_PAPER_ADAPTERS = {"deterministic", "vnpy_paper"}
 
 
 @dataclass(frozen=True)
+class FeeConfig:
+    commission_rate: Decimal
+    commission_min: Decimal
+    stamp_duty_rate: Decimal
+    stamp_duty_side: str
+    transfer_fee_rate: Decimal
+    transfer_fee_side: str
+
+    def __post_init__(self) -> None:
+        for name in ("commission_rate", "stamp_duty_rate", "transfer_fee_rate"):
+            object.__setattr__(self, name, Decimal(str(getattr(self, name))))
+        object.__setattr__(self, "commission_min", money(self.commission_min))
+        object.__setattr__(self, "stamp_duty_side", self.stamp_duty_side.upper())
+        object.__setattr__(self, "transfer_fee_side", self.transfer_fee_side.upper())
+        if min(self.commission_rate, self.stamp_duty_rate, self.transfer_fee_rate) < 0:
+            raise ValueError("fee rates cannot be negative")
+        if self.commission_min < 0:
+            raise ValueError("commission_min cannot be negative")
+        if self.stamp_duty_side not in {"BUY", "SELL", "BOTH", "NONE"}:
+            raise ValueError("invalid stamp_duty_side")
+        if self.transfer_fee_side not in {"BUY", "SELL", "BOTH", "NONE"}:
+            raise ValueError("invalid transfer_fee_side")
+
+    def to_dict(self) -> dict[str, str]:
+        return {key: str(value) for key, value in self.__dict__.items()}
+
+
+@dataclass(frozen=True)
 class PaperConfig:
     account_id: str
     currency: str
@@ -31,23 +59,21 @@ class PaperConfig:
     lot_size: int
     max_participation_rate: Decimal
     slippage_bps: Decimal
-    commission_bps: Decimal
-    minimum_commission: Decimal
-    sell_stamp_tax_bps: Decimal
-    transfer_fee_bps: Decimal
+    fees: FeeConfig
     ruleset_version: str
 
     def __post_init__(self) -> None:
         for name in (
             "initial_cash", "max_order_value", "max_symbol_value", "max_total_exposure",
-            "min_cash_buffer", "max_daily_loss", "minimum_commission",
+            "min_cash_buffer", "max_daily_loss",
         ):
             object.__setattr__(self, name, money(getattr(self, name)))
         for name in (
-            "max_participation_rate", "slippage_bps", "commission_bps",
-            "sell_stamp_tax_bps", "transfer_fee_bps",
+            "max_participation_rate", "slippage_bps",
         ):
             object.__setattr__(self, name, Decimal(str(getattr(self, name))))
+        if isinstance(self.fees, dict):
+            object.__setattr__(self, "fees", FeeConfig(**self.fees))
         object.__setattr__(self, "whitelist", tuple(self.whitelist))
         if not self.paper_mode:
             raise ValueError("paper_mode must remain true")
@@ -74,6 +100,8 @@ class PaperConfig:
                 result[key] = str(value)
             elif isinstance(value, tuple):
                 result[key] = list(value)
+            elif isinstance(value, FeeConfig):
+                result[key] = value.to_dict()
         return result
 
 
@@ -82,6 +110,15 @@ def load_config(path: str | Path) -> PaperConfig:
     if not source.exists():
         raise FileNotFoundError(f"paper trading config does not exist: {source}")
     data = json.loads(source.read_text(encoding="utf-8"))
+    if "fees" not in data:
+        data["fees"] = {
+            "commission_rate": str(Decimal(str(data.pop("commission_bps"))) / Decimal("10000")),
+            "commission_min": data.pop("minimum_commission"),
+            "stamp_duty_rate": str(Decimal(str(data.pop("sell_stamp_tax_bps"))) / Decimal("10000")),
+            "stamp_duty_side": "SELL",
+            "transfer_fee_rate": str(Decimal(str(data.pop("transfer_fee_bps"))) / Decimal("10000")),
+            "transfer_fee_side": "BOTH",
+        }
     required = set(PaperConfig.__dataclass_fields__)
     missing = sorted(required - set(data))
     if missing:

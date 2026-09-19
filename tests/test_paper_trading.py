@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from zoneinfo import ZoneInfo
@@ -36,10 +37,14 @@ def config(**overrides) -> PaperConfig:
         "lot_size": 100,
         "max_participation_rate": "0.10",
         "slippage_bps": "5",
-        "commission_bps": "2.5",
-        "minimum_commission": "5.00",
-        "sell_stamp_tax_bps": "5",
-        "transfer_fee_bps": "0.1",
+        "fees": {
+            "commission_rate": "0.00025",
+            "commission_min": "5.00",
+            "stamp_duty_rate": "0.0005",
+            "stamp_duty_side": "SELL",
+            "transfer_fee_rate": "0.00001",
+            "transfer_fee_side": "BOTH",
+        },
         "ruleset_version": "risk-v1",
     }
     values.update(overrides)
@@ -196,6 +201,36 @@ class PaperTradingTests(unittest.TestCase):
             result = service.execute("unapproved", now + timedelta(seconds=1))
             self.assertEqual(result["status"], OrderStatus.APPROVAL_PENDING.value)
             self.assertIsNone(ledger.order_for_intent("unapproved"))
+
+    def test_small_buy_records_minimum_commission_and_transfer_fee(self):
+        created = datetime(2026, 9, 21, 9, 59, 30, tzinfo=SHANGHAI)
+        tick_at = datetime(2026, 9, 21, 10, 0, 0, tzinfo=SHANGHAI)
+        now = tick_at + timedelta(seconds=1)
+        small_quote = MarketQuote(
+            symbol="002195.SZ", timestamp=tick_at, last="6.10", bid="6.09", ask="6.10",
+            bid_size=10000, ask_size=10000, source="unit_test", tradable=True,
+            limit_up="6.71", limit_down="5.49", snapshot_id="small-buy-quote",
+        )
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config()
+            ledger = PaperLedger(root / "paper.sqlite3")
+            ledger.initialize_account(cfg, created)
+            service = OrderService(cfg, ledger, StaticQuoteBroker(small_quote), root)
+            small_intent = SignalIntent(
+                intent_id="small-buy", created_at=created, strategy_id="unit-test-v1",
+                symbol="002195.SZ", side=OrderSide.BUY, quantity=100, limit_price="6.10",
+                valid_until=created + timedelta(minutes=30), reason_codes=("fee_test",),
+                evidence_snapshot_id="fee-test",
+            )
+            service.propose(small_intent, small_quote, now)
+            service.approve("small-buy", "tester", "", now)
+            service.execute("small-buy", now + timedelta(seconds=1))
+            with ledger.connection() as con:
+                fill = con.execute("SELECT * FROM fills").fetchone()
+            total_fees = sum(Decimal(fill[key]) for key in ("commission", "stamp_tax", "transfer_fee"))
+            self.assertEqual(total_fees, Decimal("5.01"))
+            self.assertAlmostEqual(float(total_fees / Decimal("610")), 0.0082, places=4)
 
 
 if __name__ == "__main__":
