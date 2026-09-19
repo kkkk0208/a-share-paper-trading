@@ -33,6 +33,7 @@ def config(**overrides) -> PaperConfig:
         "min_cash_buffer": "20000.00",
         "max_daily_loss": "3000.00",
         "approval_ttl_seconds": 300,
+        "intent_ttl_minutes": 30,
         "lot_size": 100,
         "max_participation_rate": "0.10",
         "slippage_bps": "5",
@@ -286,6 +287,32 @@ class PaperTradingTests(unittest.TestCase):
             self.assertEqual(result["status"], OrderStatus.SUBMITTED.value)
             with ledger.connection() as con:
                 self.assertEqual(con.execute("SELECT COUNT(*) count FROM fills").fetchone()["count"], 0)
+
+    def test_approved_intent_expires_and_cancel_is_audited(self):
+        created = datetime(2026, 9, 21, 10, 0, 0, tzinfo=SHANGHAI)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config(intent_ttl_minutes=1)
+            ledger = PaperLedger(root / "paper.sqlite3")
+            ledger.initialize_account(cfg, created)
+            tick = quote(created)
+            service = OrderService(cfg, ledger, StaticQuoteBroker(tick), root)
+            service.propose(intent("will-expire", "BUY", created), tick, created)
+            service.approve("will-expire", "tester", "", created)
+            result = service.execute("will-expire", created + timedelta(minutes=2))
+            self.assertEqual(result["status"], OrderStatus.EXPIRED.value)
+            self.assertEqual(len(ledger.list_intents("expired")), 1)
+            with ledger.connection() as con:
+                event = con.execute(
+                    "SELECT event_type FROM intent_events WHERE intent_id=? ORDER BY id DESC LIMIT 1",
+                    ("will-expire",),
+                ).fetchone()
+            self.assertEqual(event["event_type"], OrderStatus.EXPIRED.value)
+
+            service.propose(intent("will-cancel", "BUY", created), tick, created)
+            canceled = ledger.cancel_intent("will-cancel", "operator canceled", created)
+            self.assertEqual(canceled["status"], OrderStatus.CANCELED.value)
+            self.assertEqual(len(ledger.list_intents("rejected")), 1)
 
 
 if __name__ == "__main__":

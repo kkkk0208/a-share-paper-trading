@@ -229,7 +229,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     side=side,
                     quantity=int(payload["quantity"]),
                     limit_price=str(payload["limit_price"]),
-                    valid_until=when + timedelta(minutes=10),
+                    valid_until=when + timedelta(minutes=config.intent_ttl_minutes),
                     reason_codes=(str(payload.get("reason") or "dashboard_manual"),),
                     evidence_snapshot_id=f"dashboard-{token}",
                     requires_user_approval=True,

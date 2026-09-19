@@ -30,6 +30,9 @@ class OrderService:
 
     def propose(self, intent: SignalIntent, quote: MarketQuote, now: datetime) -> dict[str, Any]:
         self.ledger.add_intent(intent, now)
+        if self.ledger.expire_intent_if_due(intent.intent_id, self.config, now):
+            return {"intent_id": intent.intent_id, "status": OrderStatus.EXPIRED.value,
+                    "decision": "REJECTED", "rejection_reasons": ["交易意图已过期"]}
         snapshot_id = self.ledger.save_quote(quote, now)
         if not quote.snapshot_id:
             quote = MarketQuote(**(quote.to_dict() | {"snapshot_id": snapshot_id}))
@@ -45,10 +48,14 @@ class OrderService:
     def approve(self, intent_id: str, actor: str, note: str, now: datetime) -> dict[str, Any]:
         if not actor.strip():
             raise ValueError("approval actor is required")
+        if self.ledger.expire_intent_if_due(intent_id, self.config, now):
+            return {"intent_id": intent_id, "status": OrderStatus.EXPIRED.value}
         self.ledger.record_approval(intent_id, True, actor.strip(), note.strip(), self.config, now)
         return {"intent_id": intent_id, "status": self.ledger.intent_status(intent_id)}
 
     def reject(self, intent_id: str, actor: str, note: str, now: datetime) -> dict[str, Any]:
+        if self.ledger.expire_intent_if_due(intent_id, self.config, now):
+            return {"intent_id": intent_id, "status": OrderStatus.EXPIRED.value}
         self.ledger.record_approval(intent_id, False, actor.strip(), note.strip(), self.config, now)
         return {"intent_id": intent_id, "status": self.ledger.intent_status(intent_id)}
 
@@ -64,6 +71,9 @@ class OrderService:
                 "status": existing["status"],
                 "filled_quantity": existing["filled_quantity"],
             }
+        if self.ledger.expire_intent_if_due(intent_id, self.config, now):
+            return {"intent_id": intent_id, "status": OrderStatus.EXPIRED.value,
+                    "rejection_reasons": ["交易意图已过期"]}
         quote = self.broker.latest_quote(intent.symbol)
         snapshot_id = self.ledger.save_quote(quote, now)
         if not quote.snapshot_id:

@@ -65,6 +65,15 @@ CREATE TABLE IF NOT EXISTS intents (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS intent_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    intent_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (intent_id) REFERENCES intents(intent_id)
+);
+
 CREATE TABLE IF NOT EXISTS risk_decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     intent_id TEXT NOT NULL,
@@ -162,6 +171,7 @@ CREATE TABLE IF NOT EXISTS market_snapshots (
 );
 
 CREATE INDEX IF NOT EXISTS idx_risk_intent ON risk_decisions(intent_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_intent_events ON intent_events(intent_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_approval_intent ON approvals(intent_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_snapshots_symbol ON market_snapshots(symbol, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_lots_symbol ON position_lots(symbol, trade_date);
@@ -329,6 +339,10 @@ class PaperLedger:
                 "INSERT INTO intents(intent_id,payload_json,status,created_at,updated_at) VALUES(?,?,?,?,?)",
                 (intent.intent_id, payload, OrderStatus.PROPOSED.value, intent.created_at.isoformat(), timestamp),
             )
+            con.execute(
+                "INSERT INTO intent_events(intent_id,event_type,payload_json,created_at) VALUES(?,?,?,?)",
+                (intent.intent_id, "CREATED", "{}", timestamp),
+            )
         return OrderStatus.PROPOSED.value
 
     def get_intent(self, intent_id: str) -> SignalIntent:
@@ -347,6 +361,71 @@ class PaperLedger:
 
     def _set_intent_status(self, con: sqlite3.Connection, intent_id: str, status: str, now: datetime) -> None:
         con.execute("UPDATE intents SET status=?,updated_at=? WHERE intent_id=?", (status, now.isoformat(), intent_id))
+
+    def expire_intent_if_due(self, intent_id: str, config: PaperConfig, now: datetime) -> bool:
+        intent = self.get_intent(intent_id)
+        deadline = min(intent.valid_until, intent.created_at + timedelta(minutes=config.intent_ttl_minutes))
+        terminal = {
+            OrderStatus.FILLED.value, OrderStatus.RISK_REJECTED.value, OrderStatus.USER_REJECTED.value,
+            OrderStatus.REJECTED.value, OrderStatus.CANCELED.value, OrderStatus.EXPIRED.value,
+        }
+        current = self.intent_status(intent_id)
+        if current in terminal or now <= deadline:
+            return current == OrderStatus.EXPIRED.value
+        with self.transaction() as con:
+            self._set_intent_status(con, intent_id, OrderStatus.EXPIRED.value, now)
+            con.execute(
+                "INSERT INTO intent_events(intent_id,event_type,payload_json,created_at) VALUES(?,?,?,?)",
+                (intent_id, OrderStatus.EXPIRED.value,
+                 json.dumps({"deadline": deadline.isoformat()}, sort_keys=True), now.isoformat()),
+            )
+            con.execute(
+                "UPDATE orders SET status=?,updated_at=? WHERE intent_id=? AND status NOT IN (?,?)",
+                (OrderStatus.CANCELED.value, now.isoformat(), intent_id,
+                 OrderStatus.FILLED.value, OrderStatus.CANCELED.value),
+            )
+        return True
+
+    def cancel_intent(self, intent_id: str, reason: str, now: datetime, actor: str = "user") -> dict[str, Any]:
+        if not reason.strip():
+            raise ValueError("cancel reason is required")
+        current = self.intent_status(intent_id)
+        if current == OrderStatus.FILLED.value:
+            raise ValueError("filled intent cannot be canceled")
+        with self.transaction() as con:
+            self._set_intent_status(con, intent_id, OrderStatus.CANCELED.value, now)
+            con.execute(
+                "UPDATE orders SET status=?,updated_at=? WHERE intent_id=? AND status<>?",
+                (OrderStatus.CANCELED.value, now.isoformat(), intent_id, OrderStatus.FILLED.value),
+            )
+            con.execute(
+                "INSERT INTO intent_events(intent_id,event_type,payload_json,created_at) VALUES(?,?,?,?)",
+                (intent_id, OrderStatus.CANCELED.value,
+                 json.dumps({"actor": actor, "reason": reason.strip()}, ensure_ascii=False, sort_keys=True),
+                 now.isoformat()),
+            )
+        return {"intent_id": intent_id, "status": OrderStatus.CANCELED.value, "reason": reason.strip()}
+
+    def list_intents(self, status: str | None = None) -> list[dict[str, Any]]:
+        groups = {
+            "pending": [OrderStatus.PROPOSED.value, OrderStatus.APPROVAL_PENDING.value,
+                        OrderStatus.SUBMITTED.value, OrderStatus.PARTIALLY_FILLED.value],
+            "approved": [OrderStatus.APPROVED.value],
+            "executed": [OrderStatus.FILLED.value],
+            "rejected": [OrderStatus.RISK_REJECTED.value, OrderStatus.USER_REJECTED.value,
+                         OrderStatus.REJECTED.value, OrderStatus.CANCELED.value],
+            "expired": [OrderStatus.EXPIRED.value],
+        }
+        with self.connection() as con:
+            if status:
+                values = groups[status]
+                placeholders = ",".join("?" for _ in values)
+                rows = con.execute(
+                    f"SELECT * FROM intents WHERE status IN ({placeholders}) ORDER BY updated_at DESC", values
+                ).fetchall()
+            else:
+                rows = con.execute("SELECT * FROM intents ORDER BY updated_at DESC").fetchall()
+        return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
 
     def save_risk_decision(self, decision: RiskDecision) -> None:
         checks = [check.__dict__ for check in decision.checks]

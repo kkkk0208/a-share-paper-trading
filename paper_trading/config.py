@@ -74,6 +74,7 @@ class PaperConfig:
     min_cash_buffer: Decimal
     max_daily_loss: Decimal
     approval_ttl_seconds: int
+    intent_ttl_minutes: int
     lot_size: int
     max_participation_rate: Decimal
     slippage_bps: Decimal
@@ -104,8 +105,8 @@ class PaperConfig:
             raise ValueError("initial_cash and lot_size must be positive")
         if not self.whitelist:
             raise ValueError("whitelist cannot be empty")
-        if self.approval_ttl_seconds <= 0:
-            raise ValueError("approval TTL must be positive")
+        if self.approval_ttl_seconds <= 0 or self.intent_ttl_minutes <= 0:
+            raise ValueError("approval and intent TTL must be positive")
         if not (Decimal("0") < self.max_participation_rate <= Decimal("1")):
             raise ValueError("max_participation_rate must be in (0, 1]")
 
@@ -133,6 +134,7 @@ def load_config(path: str | Path) -> PaperConfig:
     if not source.exists():
         raise FileNotFoundError(f"paper trading config does not exist: {source}")
     data = json.loads(source.read_text(encoding="utf-8"))
+    data.setdefault("intent_ttl_minutes", 30)
     if "fees" not in data:
         data["fees"] = {
             "commission_rate": str(Decimal(str(data.pop("commission_bps"))) / Decimal("10000")),

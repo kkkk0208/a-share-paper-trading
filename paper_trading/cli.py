@@ -60,7 +60,7 @@ def parser() -> argparse.ArgumentParser:
     draft.add_argument("--limit-price", required=True)
     draft.add_argument("--reason", action="append", required=True)
     draft.add_argument("--strategy-id", default="manual-paper-v1")
-    draft.add_argument("--valid-minutes", type=int, default=10)
+    draft.add_argument("--valid-minutes", type=int)
     draft.add_argument("--output", required=True)
 
     propose = commands.add_parser("propose")
@@ -87,6 +87,11 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("reconcile")
     commands.add_parser("kill")
     commands.add_parser("resume")
+    intents = commands.add_parser("intents")
+    intents.add_argument("--status", choices=["pending", "approved", "executed", "rejected", "expired"])
+    cancel = commands.add_parser("cancel")
+    cancel.add_argument("--intent-id", required=True)
+    cancel.add_argument("--reason", required=True)
     return result
 
 
@@ -113,7 +118,7 @@ def main(argv: list[str] | None = None) -> int:
             side=OrderSide(args.side),
             quantity=args.quantity,
             limit_price=args.limit_price,
-            valid_until=when + timedelta(minutes=args.valid_minutes),
+            valid_until=when + timedelta(minutes=args.valid_minutes or config.intent_ttl_minutes),
             reason_codes=tuple(args.reason),
             evidence_snapshot_id=f"manual-{token}",
             requires_user_approval=True,
@@ -146,6 +151,15 @@ def main(argv: list[str] | None = None) -> int:
         errors = reconcile(ledger, config.account_id)
         print_json({"status": "OK" if not errors else "FAILED", "errors": errors})
         return 0 if not errors else 2
+    if args.command == "intents":
+        for row in ledger.list_intents():
+            ledger.expire_intent_if_due(row["intent_id"], config, when)
+        rows = ledger.list_intents(args.status)
+        print_json({"status": args.status or "all", "count": len(rows), "intents": rows})
+        return 0
+    if args.command == "cancel":
+        print_json(ledger.cancel_intent(args.intent_id, args.reason, when))
+        return 0
 
     if args.command == "propose":
         intent = load_intent(args.intent)
@@ -153,16 +167,23 @@ def main(argv: list[str] | None = None) -> int:
         service = OrderService(config, ledger, broker, runtime)
         print_json(service.propose(intent, quote, when))
         return 0
-    if args.command in {"approve", "reject", "execute"}:
+    if args.command in {"approve", "reject"}:
+        service = OrderService(config, ledger, StaticQuoteBroker(MarketQuote(
+            symbol=ledger.get_intent(args.intent_id).symbol,
+            timestamp=when,
+            last="1", bid="1", ask="1", bid_size=0, ask_size=0,
+            source="approval_only", tradable=False, limit_up="1", limit_down="1",
+        )), runtime)
+        if args.command == "approve":
+            print_json(service.approve(args.intent_id, args.actor, args.note, when))
+        else:
+            print_json(service.reject(args.intent_id, args.actor, args.note, when))
+        return 0
+    if args.command == "execute":
         intent = ledger.get_intent(args.intent_id)
         broker, _ = load_quote(getattr(args, "quote", None), intent.symbol)
         service = OrderService(config, ledger, broker, runtime)
-        if args.command == "approve":
-            print_json(service.approve(args.intent_id, args.actor, args.note, when))
-        elif args.command == "reject":
-            print_json(service.reject(args.intent_id, args.actor, args.note, when))
-        else:
-            print_json(service.execute(args.intent_id, when))
+        print_json(service.execute(args.intent_id, when))
         return 0
     return 1
 
