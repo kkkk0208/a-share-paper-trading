@@ -1,5 +1,7 @@
 # A 股模拟交易 MVP 使用说明
 
+本系统的成交结果不代表真实成交，不能作为策略有效性的证据。
+
 ## 当前能力
 
 - 腾讯实时盘口快照：最新价、买一、卖一、盘口数量、涨跌停价和行情时间。
@@ -9,8 +11,21 @@
 - 一键停止：启用后拒绝所有新交易。
 - 默认没有真实券商适配器，也没有实盘模式开关。
 - 本地浏览器看板：账户、持仓、订单、成交、待审批、风控和一键停止。
+- 持仓按买入批次保存，卖出按 FIFO 扣减，T+1 可用量按最新行情日期实时计算。
+- 腾讯主行情源与新浪降级源；任何来源缺失关键字段或全部失败时 fail closed。
+- 每日净值曲线、沪深 300 对比、回撤和交易绩效。
+- 手工录入并应用现金分红、送股与拆股。
 
 实时行情与模拟成交是两件事：行情来自真实市场快照，订单只在本地撮合，不发送到交易所。
+
+## 必须先了解的限制
+
+- 当前实时行情是快照式 Level 1 数据，不是交易所逐笔队列。
+- 模拟成交仅适合练习执行纪律和验证下单流程，不适合验证策略；一天几笔的样本量，即使运行一年通常也不足以达到统计显著，策略验证需另做 backtest。
+- 节假日仍需接入正式交易日历；现阶段除工作日外还会依靠行情时间和连续竞价时段拦截。
+- 新浪公开 Level 1 快照不稳定且可能缺少涨跌停价；缺失时系统会拒绝交易，不会按固定百分比推算。
+- vn.py PaperAccount 适配边界已经预留，但依赖尚未安装；核心使用本地确定性撮合器。
+- 默认佣金率 0.025%、最低佣金 5 元仅是示例，必须按计划模拟的券商账户确认。印花税默认卖出 0.05%，过户费默认双向 0.001%。
 
 ## 首次配置
 
@@ -82,10 +97,43 @@
 .\scripts\paper_trading.ps1 reconcile
 ```
 
-次一交易日开始前执行 T+1 结转：
+`settle` 已改为兼容 no-op，可用数量不再依赖人工结转：
 
 ```powershell
 .\scripts\paper_trading.ps1 settle --trade-date 2026-09-21
+```
+
+## 意图查询、取消与过期
+
+```powershell
+.\scripts\paper_trading.ps1 intents --status pending
+.\scripts\paper_trading.ps1 intents --status approved
+.\scripts\paper_trading.ps1 intents --status expired
+.\scripts\paper_trading.ps1 cancel --intent-id <精确的意图ID> --reason "条件变化"
+```
+
+意图默认 30 分钟过期；`propose`、`approve` 和 `execute` 都会阻止继续处理过期意图，并写入审计记录。
+
+## 收盘净值与绩效
+
+每天收盘后保存一次净值和沪深 300 快照：
+
+```powershell
+.\scripts\paper_trading.ps1 snapshot
+.\scripts\paper_trading.ps1 perf --from 2026-01-01 --to 2026-12-31
+```
+
+绩效输出累计/年化收益、最大回撤、交易笔数、胜率、盈亏比和相对沪深 300 的超额收益。少于两个收盘快照时拒绝计算。
+
+## 除权除息
+
+公司行动数据先手工录入，再按日期应用；重复应用不会二次调整：
+
+```powershell
+.\scripts\paper_trading.ps1 corp-add `
+  --symbol 002195.SZ --ex-date 2026-06-01 `
+  --cash-dividend 0.10 --stock-dividend 0 --split-ratio 1
+.\scripts\paper_trading.ps1 corp-apply --through 2026-06-01
 ```
 
 ## 一键停止与恢复
@@ -104,10 +152,3 @@
 - 交易意图：`runtime/paper_trading/intents/`
 
 运行数据和本地配置不会提交到 Git。删除数据库等同于删除模拟账户历史，操作前必须备份。
-
-## 当前限制
-
-- 当前实时行情是快照式 Level 1 数据，不是交易所逐笔队列。
-- 节假日仍需接入正式交易日历；现阶段除工作日外还会依靠行情时间和连续竞价时段拦截。
-- vn.py PaperAccount 适配边界已经预留，但依赖尚未安装；核心 MVP 使用本地确定性撮合器。
-- 示例费用必须根据用户计划模拟的券商费率进行确认。

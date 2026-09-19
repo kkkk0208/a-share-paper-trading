@@ -796,18 +796,33 @@ class PaperLedger:
                     new_total += new_quantity
                     cash_delta += cash_dividend * old_quantity
                 if cash_delta:
-                    account = con.execute("SELECT cash FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+                    account = con.execute(
+                        "SELECT cash,realized_pnl FROM accounts WHERE account_id=?", (account_id,)
+                    ).fetchone()
                     if not account:
                         raise KeyError(account_id)
                     new_cash = money(Decimal(account["cash"]) + cash_delta)
                     con.execute(
-                        "UPDATE accounts SET cash=?,updated_at=? WHERE account_id=?",
-                        (str(new_cash), when.isoformat(), account_id),
+                        "UPDATE accounts SET cash=?,realized_pnl=?,updated_at=? WHERE account_id=?",
+                        (str(new_cash), str(money(Decimal(account["realized_pnl"]) + cash_delta)),
+                         when.isoformat(), account_id),
                     )
                     con.execute(
                         "INSERT INTO cash_ledger(account_id,event_type,reference_id,amount,balance_after,created_at) VALUES(?,?,?,?,?,?)",
                         (account_id, "CASH_DIVIDEND", f"CA-{action['id']}", str(money(cash_delta)),
                          str(new_cash), when.isoformat()),
+                    )
+                if lots:
+                    available_after = con.execute(
+                        "SELECT COALESCE(SUM(quantity),0) quantity FROM position_lots "
+                        "WHERE account_id=? AND symbol=? AND trade_date<?",
+                        (account_id, action["symbol"], through_date.isoformat()),
+                    ).fetchone()["quantity"]
+                    con.execute(
+                        "INSERT INTO position_ledger(account_id,symbol,reference_id,quantity_delta,quantity_after,available_after,created_at) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (account_id, action["symbol"], f"CA-{action['id']}", new_total - old_total,
+                         new_total, int(available_after), when.isoformat()),
                     )
                 con.execute("UPDATE corporate_actions SET applied_at=? WHERE id=?", (when.isoformat(), action["id"]))
                 applied.append({

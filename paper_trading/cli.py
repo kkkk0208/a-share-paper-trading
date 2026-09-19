@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         for position in ledger.positions(config.account_id):
             ledger.save_quote(broker.latest_quote(position["symbol"]), when)
         benchmark = broker.latest_quote(config.benchmark_symbol)
-        if benchmark.timestamp.astimezone().hour < 15:
+        if benchmark.timestamp.hour < 15:
             raise ValueError("净值快照只能使用收盘后的基准行情")
         result = ledger.record_equity_snapshot(
             config.account_id, benchmark.timestamp.date(), benchmark.last, when,

@@ -93,6 +93,28 @@ def quote(at: datetime, bid: str = "10.00", ask: str = "10.00") -> MarketQuote:
 
 
 class PaperTradingTests(unittest.TestCase):
+    def test_legacy_position_is_migrated_to_one_historical_lot_once(self):
+        with TemporaryDirectory() as temp:
+            db = Path(temp) / "paper.sqlite3"
+            cfg = config()
+            ledger = PaperLedger(db)
+            ledger.initialize_account(cfg)
+            with ledger.transaction() as con:
+                con.execute("DELETE FROM schema_migrations WHERE name='positions_to_lots_v1'")
+                con.execute(
+                    "INSERT INTO positions(account_id,symbol,quantity,available_quantity,t0_quantity,t0_date,average_cost,realized_pnl,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (cfg.account_id, "002195.SZ", 300, 300, 0, None, "6.50", "0", "2026-01-01T00:00:00+08:00"),
+                )
+            migrated = PaperLedger(db)
+            position = migrated.position(cfg.account_id, "002195.SZ", datetime(2026, 9, 1).date())
+            self.assertEqual(position["quantity"], 300)
+            self.assertEqual(position["available_quantity"], 300)
+            self.assertEqual(position["average_cost"], Decimal("6.50"))
+            PaperLedger(db)
+            with migrated.connection() as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) count FROM position_lots").fetchone()["count"], 1)
+
     def test_quote_provider_fails_closed_then_switches_without_cache(self):
         expected = quote(datetime(2026, 9, 21, 10, 0, tzinfo=SHANGHAI))
 
@@ -162,6 +184,7 @@ class PaperTradingTests(unittest.TestCase):
             position = ledger.position(cfg.account_id, "002195.SZ", datetime(2026, 6, 2).date())
             self.assertEqual(position["quantity"], 110)
             self.assertEqual(position["average_cost"], Decimal("8.64"))
+            self.assertEqual(reconcile(ledger, cfg.account_id), [])
             self.assertEqual(
                 ledger.apply_corporate_actions(cfg.account_id, datetime(2026, 6, 1).date(), now), []
             )

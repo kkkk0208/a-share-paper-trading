@@ -65,7 +65,9 @@ class RiskEngine:
             estimated_fee = max(
                 self.config.fees.commission_min,
                 money(order_value * self.config.fees.commission_rate),
-            ) + money(order_value * self.config.fees.transfer_fee_rate)
+            )
+            if self.config.fees.transfer_fee_side in {"BUY", "BOTH"}:
+                estimated_fee += money(order_value * self.config.fees.transfer_fee_rate)
             check("cash", account["cash"] - order_value - estimated_fee >= self.config.min_cash_buffer,
                   "买入后现金低于安全垫")
             check("max_symbol_value", current_symbol_value + order_value <= self.config.max_symbol_value,
