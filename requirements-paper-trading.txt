@@ -1,0 +1,4 @@
+# Core MVP uses only Python 3.12 standard library.
+# Optional integration, install only after core acceptance tests pass:
+# vnpy==4.4.0
+# vnpy_paperaccount==1.1.0

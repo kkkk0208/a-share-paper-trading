@@ -1,0 +1,113 @@
+# A 股模拟交易 MVP 使用说明
+
+## 当前能力
+
+- 腾讯实时盘口快照：最新价、买一、卖一、盘口数量、涨跌停价和行情时间。
+- 本地模拟账户：现金、持仓、T+1 可用数量、成本、费用和盈亏。
+- 交易意图、硬性风控、人工批准、模拟撮合和完整 SQLite 审计流水。
+- 幂等下单：重复执行相同意图不会产生第二笔订单。
+- 一键停止：启用后拒绝所有新交易。
+- 默认没有真实券商适配器，也没有实盘模式开关。
+- 本地浏览器看板：账户、持仓、订单、成交、待审批、风控和一键停止。
+
+实时行情与模拟成交是两件事：行情来自真实市场快照，订单只在本地撮合，不发送到交易所。
+
+## 首次配置
+
+推荐直接启动看板，在网页中确认并创建账户：
+
+```powershell
+.\scripts\run_paper_dashboard.ps1
+```
+
+浏览器访问 `http://127.0.0.1:8765`。服务仅监听本机地址，其他电脑无法访问。
+
+如需使用命令行配置：
+
+1. 阅读 `config/paper_trading.example.json`。
+2. 明确填写本金、白名单、单笔上限、单股上限、总仓位上限、现金安全垫和亏损保护值。
+3. 将审核后的文件复制为 `config/paper_trading.json`。该文件已加入 `.gitignore`。
+4. 初始化账户：
+
+```powershell
+.\scripts\paper_trading.ps1 init
+```
+
+示例文件中的数值仅用于演示，不应在未确认的情况下直接作为正式模拟账户规则。
+
+## 一笔交易的完整流程
+
+### 1. 生成结构化交易意图
+
+```powershell
+.\scripts\paper_trading.ps1 draft `
+  --symbol 002195.SZ `
+  --side BUY `
+  --quantity 100 `
+  --limit-price 6.10 `
+  --reason manual_test `
+  --output runtime\paper_trading\intents\buy-002195.json
+```
+
+### 2. 使用实时行情进行风控
+
+```powershell
+.\scripts\paper_trading.ps1 propose `
+  --intent runtime\paper_trading\intents\buy-002195.json
+```
+
+行情过期、非连续竞价、停牌、超出白名单、资金不足或违反仓位限制时，意图会被拒绝。
+
+### 3. 人工批准
+
+```powershell
+.\scripts\paper_trading.ps1 approve `
+  --intent-id <精确的意图ID> `
+  --actor user `
+  --note "已核对代码、数量、限价和风险占用"
+```
+
+### 4. 获取下一条实时行情并模拟执行
+
+```powershell
+.\scripts\paper_trading.ps1 execute --intent-id <精确的意图ID>
+```
+
+执行器不会用生成意图时已经看到的旧价格回填成交。只有后续合格行情满足限价和盘口数量条件时才会模拟成交。
+
+### 5. 查看账户和对账
+
+```powershell
+.\scripts\paper_trading.ps1 status
+.\scripts\paper_trading.ps1 reconcile
+```
+
+次一交易日开始前执行 T+1 结转：
+
+```powershell
+.\scripts\paper_trading.ps1 settle --trade-date 2026-09-21
+```
+
+## 一键停止与恢复
+
+```powershell
+.\scripts\paper_trading.ps1 kill
+.\scripts\paper_trading.ps1 resume
+```
+
+`kill` 后只能查询和对账，所有新交易都会被硬风控拒绝。恢复不会自动执行此前被拒绝或过期的意图。
+
+## 运行数据
+
+- 数据库：`runtime/paper_trading/paper_trading.sqlite3`
+- 停止标记：`runtime/paper_trading/kill_switch`
+- 交易意图：`runtime/paper_trading/intents/`
+
+运行数据和本地配置不会提交到 Git。删除数据库等同于删除模拟账户历史，操作前必须备份。
+
+## 当前限制
+
+- 当前实时行情是快照式 Level 1 数据，不是交易所逐笔队列。
+- 节假日仍需接入正式交易日历；现阶段除工作日外还会依靠行情时间和连续竞价时段拦截。
+- vn.py PaperAccount 适配边界已经预留，但依赖尚未安装；核心 MVP 使用本地确定性撮合器。
+- 示例费用必须根据用户计划模拟的券商费率进行确认。

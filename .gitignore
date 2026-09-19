@@ -1,0 +1,5 @@
+runtime/paper_trading/
+config/paper_trading.json
+__pycache__/
+*.pyc
+paper_dashboard/.qa_*/

@@ -1,0 +1,89 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from decimal import Decimal
+from pathlib import Path
+from typing import Any
+
+from .models import money
+
+
+ALLOWED_PAPER_ADAPTERS = {"deterministic", "vnpy_paper"}
+
+
+@dataclass(frozen=True)
+class PaperConfig:
+    account_id: str
+    currency: str
+    initial_cash: Decimal
+    paper_mode: bool
+    adapter: str
+    whitelist: tuple[str, ...]
+    max_order_value: Decimal
+    max_symbol_value: Decimal
+    max_total_exposure: Decimal
+    min_cash_buffer: Decimal
+    max_daily_loss: Decimal
+    max_quote_age_seconds: int
+    approval_ttl_seconds: int
+    lot_size: int
+    max_participation_rate: Decimal
+    slippage_bps: Decimal
+    commission_bps: Decimal
+    minimum_commission: Decimal
+    sell_stamp_tax_bps: Decimal
+    transfer_fee_bps: Decimal
+    ruleset_version: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "initial_cash", "max_order_value", "max_symbol_value", "max_total_exposure",
+            "min_cash_buffer", "max_daily_loss", "minimum_commission",
+        ):
+            object.__setattr__(self, name, money(getattr(self, name)))
+        for name in (
+            "max_participation_rate", "slippage_bps", "commission_bps",
+            "sell_stamp_tax_bps", "transfer_fee_bps",
+        ):
+            object.__setattr__(self, name, Decimal(str(getattr(self, name))))
+        object.__setattr__(self, "whitelist", tuple(self.whitelist))
+        if not self.paper_mode:
+            raise ValueError("paper_mode must remain true")
+        if self.adapter not in ALLOWED_PAPER_ADAPTERS:
+            raise ValueError(f"adapter must be one of {sorted(ALLOWED_PAPER_ADAPTERS)}")
+        if self.initial_cash <= 0 or self.lot_size <= 0:
+            raise ValueError("initial_cash and lot_size must be positive")
+        if not self.whitelist:
+            raise ValueError("whitelist cannot be empty")
+        if self.max_quote_age_seconds <= 0 or self.approval_ttl_seconds <= 0:
+            raise ValueError("quote age and approval TTL must be positive")
+        if not (Decimal("0") < self.max_participation_rate <= Decimal("1")):
+            raise ValueError("max_participation_rate must be in (0, 1]")
+
+    @property
+    def fingerprint(self) -> str:
+        payload = json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    def to_dict(self) -> dict[str, Any]:
+        result = dict(self.__dict__)
+        for key, value in list(result.items()):
+            if isinstance(value, Decimal):
+                result[key] = str(value)
+            elif isinstance(value, tuple):
+                result[key] = list(value)
+        return result
+
+
+def load_config(path: str | Path) -> PaperConfig:
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(f"paper trading config does not exist: {source}")
+    data = json.loads(source.read_text(encoding="utf-8"))
+    required = set(PaperConfig.__dataclass_fields__)
+    missing = sorted(required - set(data))
+    if missing:
+        raise ValueError(f"missing config fields: {', '.join(missing)}")
+    return PaperConfig(**{key: data[key] for key in required})

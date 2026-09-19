@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="本地 A 股模拟交易账户、审批、订单与风控看板">
+  <title>A股模拟交易台</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%2308121f'/%3E%3Cpath d='M14 43l12-13 9 8 15-20' fill='none' stroke='%235de4c7' stroke-width='6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">模</div>
+        <div><h1>A股模拟交易台</h1><p>真实行情快照 · 本地模拟成交</p></div>
+      </div>
+      <div class="top-actions">
+        <span class="status-chip" id="marketStatus"><i></i>正在连接</span>
+        <button class="button ghost" id="refreshButton" type="button">刷新</button>
+        <button class="button danger" id="killButton" type="button">一键停止</button>
+      </div>
+    </header>
+
+    <main id="dashboard" hidden>
+      <section class="account-strip" aria-label="账户概览">
+        <article><span>总资产</span><strong id="equity">—</strong><small id="equityDelta">模拟账户</small></article>
+        <article><span>可用现金</span><strong id="cash">—</strong><small id="cashRatio">—</small></article>
+        <article><span>持仓市值</span><strong id="marketValue">—</strong><small id="exposureRatio">—</small></article>
+        <article><span>累计盈亏</span><strong id="totalPnl">—</strong><small id="pnlBreakdown">—</small></article>
+      </section>
+
+      <section class="workspace-grid">
+        <article class="panel positions-panel">
+          <div class="panel-head"><div><p class="eyebrow">PORTFOLIO</p><h2>当前持仓</h2></div><span id="positionCount" class="count-pill">0 只</span></div>
+          <div class="table-wrap"><table><thead><tr><th>证券</th><th>持仓 / 可用</th><th>成本 / 现价</th><th>市值</th><th>浮动盈亏</th></tr></thead><tbody id="positionsBody"></tbody></table></div>
+          <div class="empty-state" id="positionsEmpty">账户尚无持仓</div>
+        </article>
+
+        <aside class="panel ticket-panel">
+          <div class="panel-head"><div><p class="eyebrow">ORDER TICKET</p><h2>模拟委托</h2></div><span class="paper-badge">仅模拟</span></div>
+          <form id="tradeForm">
+            <label>证券代码<select id="symbolInput" required></select></label>
+            <div class="segmented" role="group" aria-label="买卖方向">
+              <button type="button" class="active buy" data-side="BUY">买入</button>
+              <button type="button" data-side="SELL">卖出</button>
+            </div>
+            <div class="field-row"><label>数量<input id="quantityInput" type="number" min="100" step="100" value="100" required></label><label>限价<input id="priceInput" type="number" min="0.01" step="0.01" required></label></div>
+            <label>交易理由<input id="reasonInput" value="manual_dashboard" maxlength="80" required></label>
+            <div class="quote-box" id="quoteBox"><span>盘口</span><b>选择证券后获取</b></div>
+            <button class="button primary full" type="submit">检查风控并生成建议</button>
+            <p class="form-note">生成建议不会成交，必须在下方再次批准并执行。</p>
+          </form>
+        </aside>
+      </section>
+
+      <section class="panel approvals-panel">
+        <div class="panel-head"><div><p class="eyebrow">DECISION QUEUE</p><h2>待处理交易</h2></div><span id="approvalCount" class="count-pill">0 笔</span></div>
+        <div class="approval-list" id="approvalList"></div>
+        <div class="empty-state" id="approvalsEmpty">当前没有待处理交易</div>
+      </section>
+
+      <section class="lower-grid">
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">ORDERS & FILLS</p><h2>订单与成交</h2></div></div><div class="table-wrap compact"><table><thead><tr><th>时间</th><th>证券</th><th>方向</th><th>数量</th><th>限价</th><th>状态</th></tr></thead><tbody id="ordersBody"></tbody></table></div><div class="empty-state" id="ordersEmpty">暂无订单</div><h3 class="subsection-title">最近成交</h3><div class="table-wrap compact"><table><thead><tr><th>时间</th><th>证券</th><th>方向</th><th>数量</th><th>成交价</th><th>费用</th></tr></thead><tbody id="fillsBody"></tbody></table></div><div class="empty-state" id="fillsEmpty">暂无成交</div></article>
+        <article class="panel"><div class="panel-head"><div><p class="eyebrow">GUARDRAILS</p><h2>风控边界</h2></div><span id="reconcileBadge" class="health-badge">对账中</span></div><dl class="risk-list" id="riskList"></dl></article>
+      </section>
+    </main>
+
+    <section class="setup-screen" id="setupScreen" hidden>
+      <div class="setup-copy"><p class="eyebrow">FIRST RUN</p><h2>创建本地模拟账户</h2><p>先确认本金和硬性边界。所有订单只在本机撮合，不会连接真实资金账户。</p><ul><li>每笔交易必须经过风控与人工批准</li><li>行情过期或非交易时段自动拒绝</li><li>配置创建后不能从看板覆盖</li></ul></div>
+      <form class="setup-form" id="setupForm">
+        <label>模拟本金<input name="initial_cash" type="number" min="10000" step="1000" required></label>
+        <div class="field-row"><label>单笔上限<input name="max_order_value" type="number" min="100" step="100" required></label><label>单股上限<input name="max_symbol_value" type="number" min="100" step="100" required></label></div>
+        <div class="field-row"><label>总仓位上限<input name="max_total_exposure" type="number" min="100" step="100" required></label><label>现金安全垫<input name="min_cash_buffer" type="number" min="0" step="100" required></label></div>
+        <label>亏损保护值<input name="max_daily_loss" type="number" min="100" step="100" required></label>
+        <fieldset><legend>允许交易的股票</legend><label class="check"><input type="checkbox" name="whitelist" value="002195.SZ" checked> 岩山科技 002195.SZ</label><label class="check"><input type="checkbox" name="whitelist" value="002815.SZ" checked> 崇达技术 002815.SZ</label></fieldset>
+        <button class="button primary full" type="submit">确认并创建模拟账户</button>
+      </form>
+    </section>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
