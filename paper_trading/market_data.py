@@ -43,6 +43,18 @@ class TencentPaperQuoteBroker(PaperBroker):
         # Tencent level-one quantities are lots; convert to shares.
         bid_size = int(Decimal(fields.get("field_10") or "0") * 100)
         ask_size = int(Decimal(fields.get("field_20") or "0") * 100)
+        bid_levels = tuple(
+            (_decimal(fields.get(f"field_{9 + level * 2}"), f"bid{level + 1}"),
+             int(Decimal(fields.get(f"field_{10 + level * 2}") or "0") * 100))
+            for level in range(5)
+            if fields.get(f"field_{9 + level * 2}")
+        )
+        ask_levels = tuple(
+            (_decimal(fields.get(f"field_{19 + level * 2}"), f"ask{level + 1}"),
+             int(Decimal(fields.get(f"field_{20 + level * 2}") or "0") * 100))
+            for level in range(5)
+            if fields.get(f"field_{19 + level * 2}")
+        )
         return MarketQuote(
             symbol=symbol,
             timestamp=_timestamp(row.timestamp),
@@ -56,6 +68,8 @@ class TencentPaperQuoteBroker(PaperBroker):
             limit_up=_decimal(fields.get("limit_up"), "limit_up") if fields.get("limit_up") else None,
             limit_down=_decimal(fields.get("limit_down"), "limit_down") if fields.get("limit_down") else None,
             snapshot_id=str(uuid.uuid4()),
+            bid_levels=bid_levels,
+            ask_levels=ask_levels,
         )
 
     def adapter_name(self) -> str:

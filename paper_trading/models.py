@@ -99,6 +99,8 @@ class MarketQuote:
     limit_up: Decimal | None = None
     limit_down: Decimal | None = None
     snapshot_id: str = ""
+    bid_levels: tuple[tuple[Decimal, int], ...] = field(default_factory=tuple)
+    ask_levels: tuple[tuple[Decimal, int], ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "timestamp", parse_time(self.timestamp))
@@ -112,6 +114,14 @@ class MarketQuote:
             raise ValueError("last, bid and ask must be positive")
         if self.bid_size < 0 or self.ask_size < 0:
             raise ValueError("quote sizes cannot be negative")
+        for name, first_price, first_size in (
+            ("bid_levels", self.bid, self.bid_size), ("ask_levels", self.ask, self.ask_size),
+        ):
+            raw_levels = getattr(self, name) or ((first_price, first_size),)
+            levels = tuple((money(price), int(size)) for price, size in raw_levels)
+            if any(price <= 0 or size < 0 for price, size in levels):
+                raise ValueError("order book levels must have positive prices and non-negative sizes")
+            object.__setattr__(self, name, levels[:5])
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)
@@ -119,6 +129,8 @@ class MarketQuote:
         for name in ("last", "bid", "ask", "limit_up", "limit_down"):
             value = result[name]
             result[name] = None if value is None else str(value)
+        for name in ("bid_levels", "ask_levels"):
+            result[name] = [[str(price), size] for price, size in getattr(self, name)]
         return result
 
 
@@ -150,6 +162,8 @@ class FillResult:
     stamp_tax: Decimal
     transfer_fee: Decimal
     quote_snapshot_id: str
+    quote_timestamp: datetime
+    order_book: dict[str, Any]
 
     @property
     def fees(self) -> Decimal:

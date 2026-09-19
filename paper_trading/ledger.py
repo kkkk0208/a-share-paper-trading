@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS fills (
     stamp_tax TEXT NOT NULL,
     transfer_fee TEXT NOT NULL,
     quote_snapshot_id TEXT NOT NULL,
+    quote_timestamp TEXT,
+    order_book_json TEXT,
     created_at TEXT NOT NULL,
     FOREIGN KEY (order_id) REFERENCES orders(order_id)
 );
@@ -208,6 +210,11 @@ class PaperLedger:
     def _create_schema(self) -> None:
         with self.connection() as con:
             con.executescript(SCHEMA)
+            columns = {row["name"] for row in con.execute("PRAGMA table_info(fills)").fetchall()}
+            if "quote_timestamp" not in columns:
+                con.execute("ALTER TABLE fills ADD COLUMN quote_timestamp TEXT")
+            if "order_book_json" not in columns:
+                con.execute("ALTER TABLE fills ADD COLUMN order_book_json TEXT")
         self.migrate_positions_to_lots()
 
     def migrate_positions_to_lots(self, now: datetime | None = None) -> int:
@@ -387,6 +394,23 @@ class PaperLedger:
             and datetime.fromisoformat(row["expires_at"]) >= now
         )
 
+    def latest_approval(self, intent_id: str) -> dict[str, Any] | None:
+        with self.connection() as con:
+            row = con.execute(
+                "SELECT * FROM approvals WHERE intent_id=? AND approved=1 ORDER BY id DESC LIMIT 1",
+                (intent_id,),
+            ).fetchone()
+        return None if not row else dict(row)
+
+    def quote_count_after(self, symbol: str, after: datetime, through: datetime) -> int:
+        with self.connection() as con:
+            row = con.execute(
+                "SELECT COUNT(DISTINCT snapshot_id) count FROM market_snapshots "
+                "WHERE symbol=? AND timestamp>? AND timestamp<=?",
+                (symbol, after.isoformat(), through.isoformat()),
+            ).fetchone()
+        return int(row["count"])
+
     def save_quote(self, quote: MarketQuote, now: datetime | None = None) -> str:
         snapshot_id = quote.snapshot_id or str(uuid.uuid4())
         payload = quote.to_dict() | {"snapshot_id": snapshot_id}
@@ -539,9 +563,10 @@ class PaperLedger:
             new_filled = order["filled_quantity"] + fill.quantity
             new_status = OrderStatus.FILLED.value if new_filled == order["quantity"] else OrderStatus.PARTIALLY_FILLED.value
             con.execute(
-                "INSERT INTO fills(fill_id,order_id,quantity,price,commission,stamp_tax,transfer_fee,quote_snapshot_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO fills(fill_id,order_id,quantity,price,commission,stamp_tax,transfer_fee,quote_snapshot_id,quote_timestamp,order_book_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (unique_fill_id, order_id, fill.quantity, str(fill.price), str(fill.commission), str(fill.stamp_tax),
-                 str(fill.transfer_fee), fill.quote_snapshot_id, now.isoformat()),
+                 str(fill.transfer_fee), fill.quote_snapshot_id, fill.quote_timestamp.isoformat(),
+                 json.dumps(fill.order_book, ensure_ascii=False, sort_keys=True), now.isoformat()),
             )
             con.execute(
                 "UPDATE accounts SET cash=?,realized_pnl=?,updated_at=? WHERE account_id=?",

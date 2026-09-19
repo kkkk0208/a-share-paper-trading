@@ -104,7 +104,7 @@ function renderDashboard(data) {
   const riskRows = [
     ["单笔上限", money.format(cfg.max_order_value)], ["单股上限", money.format(cfg.max_symbol_value)],
     ["总仓位上限", money.format(cfg.max_total_exposure)], ["现金安全垫", money.format(cfg.min_cash_buffer)],
-    ["亏损保护", money.format(cfg.max_daily_loss)], ["行情最大时延", `${cfg.max_quote_age_seconds} 秒`],
+    ["亏损保护", money.format(cfg.max_daily_loss)], ["行情最大时延", `${cfg.matching.max_quote_age_seconds} 秒`],
     ["允许标的", cfg.whitelist.join("、")]
   ];
   $("#riskList").innerHTML = riskRows.map(([key, value]) => `<div><dt>${esc(key)}</dt><dd>${esc(value)}</dd></div>`).join("");

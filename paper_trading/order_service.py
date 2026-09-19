@@ -78,9 +78,16 @@ class OrderService:
             return {"intent_id": intent_id, "status": OrderStatus.APPROVAL_PENDING.value,
                     "rejection_reasons": ["缺少有效人工批准，或批准时使用的风控配置已变化"]}
 
+        approval = self.ledger.latest_approval(intent_id)
+        if not approval:
+            return {"intent_id": intent_id, "status": OrderStatus.APPROVAL_PENDING.value,
+                    "rejection_reasons": ["缺少人工批准记录"]}
+        approved_at = datetime.fromisoformat(approval["created_at"])
+        ticks_after_approval = self.ledger.quote_count_after(intent.symbol, approved_at, quote.timestamp)
+
         order = self.ledger.create_order(intent, now)
         remaining = order["quantity"] - order["filled_quantity"]
-        fill = self.matcher.match(intent, quote, remaining)
+        fill = self.matcher.match(intent, quote, remaining, approved_at, ticks_after_approval, now)
         if fill is None:
             return {"intent_id": intent_id, "order_id": order["order_id"],
                     "status": order["status"], "filled_quantity": order["filled_quantity"]}

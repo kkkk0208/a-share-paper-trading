@@ -47,7 +47,7 @@ class RiskEngine:
         check("whitelist", intent.symbol in self.config.whitelist, f"{intent.symbol} 不在白名单")
         check("not_expired", now <= intent.valid_until, "交易意图已过期")
         check("quote_symbol", quote.symbol == intent.symbol, "行情证券与交易意图不一致")
-        check("quote_fresh", -2 <= age <= self.config.max_quote_age_seconds,
+        check("quote_fresh", -2 <= age <= self.config.matching.max_quote_age_seconds,
               f"行情时延 {age:.1f} 秒超过限制")
         check("trading_session", in_continuous_session(quote.timestamp), "不在连续竞价时段或不是工作日")
         check("tradable", quote.tradable, "证券当前不可交易")

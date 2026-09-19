@@ -32,7 +32,6 @@ def config(**overrides) -> PaperConfig:
         "max_total_exposure": "60000.00",
         "min_cash_buffer": "20000.00",
         "max_daily_loss": "3000.00",
-        "max_quote_age_seconds": 15,
         "approval_ttl_seconds": 300,
         "lot_size": 100,
         "max_participation_rate": "0.10",
@@ -44,6 +43,11 @@ def config(**overrides) -> PaperConfig:
             "stamp_duty_side": "SELL",
             "transfer_fee_rate": "0.00001",
             "transfer_fee_side": "BOTH",
+        },
+        "matching": {
+            "min_depth_ratio": "3.0",
+            "min_ticks_delay": 1,
+            "max_quote_age_seconds": 10,
         },
         "ruleset_version": "risk-v1",
     }
@@ -115,7 +119,8 @@ class PaperTradingTests(unittest.TestCase):
             self.assertEqual(proposed["status"], OrderStatus.APPROVAL_PENDING.value)
             self.assertEqual(service.approve("buy-001", "tester", "approved", now)["status"], "APPROVED")
 
-            result = service.execute("buy-001", now + timedelta(seconds=1))
+            service.broker.quote = quote(tick_at + timedelta(seconds=2))
+            result = service.execute("buy-001", now + timedelta(seconds=2))
             self.assertEqual(result["status"], OrderStatus.FILLED.value)
             self.assertEqual(result["filled_quantity"], 100)
             duplicate = service.execute("buy-001", now + timedelta(seconds=2))
@@ -151,7 +156,8 @@ class PaperTradingTests(unittest.TestCase):
             service = OrderService(cfg, ledger, StaticQuoteBroker(tick), root)
             service.propose(intent("buy-before-sell", "BUY", created), tick, now)
             service.approve("buy-before-sell", "tester", "", now)
-            service.execute("buy-before-sell", now + timedelta(seconds=1))
+            service.broker.quote = quote(tick_at + timedelta(seconds=2))
+            service.execute("buy-before-sell", now + timedelta(seconds=2))
 
             sell_intent = intent("sell-same-day", "SELL", created + timedelta(minutes=2))
             result = service.propose(sell_intent, tick, now + timedelta(minutes=2))
@@ -243,12 +249,43 @@ class PaperTradingTests(unittest.TestCase):
             )
             service.propose(small_intent, small_quote, now)
             service.approve("small-buy", "tester", "", now)
-            service.execute("small-buy", now + timedelta(seconds=1))
+            execution_quote = MarketQuote(**(
+                small_quote.to_dict() | {
+                    "timestamp": (tick_at + timedelta(seconds=2)).isoformat(),
+                    "snapshot_id": "small-buy-execution-quote",
+                }
+            ))
+            service.broker.quote = execution_quote
+            service.execute("small-buy", now + timedelta(seconds=2))
             with ledger.connection() as con:
                 fill = con.execute("SELECT * FROM fills").fetchone()
             total_fees = sum(Decimal(fill[key]) for key in ("commission", "stamp_tax", "transfer_fee"))
             self.assertEqual(total_fees, Decimal("5.01"))
             self.assertAlmostEqual(float(total_fees / Decimal("610")), 0.0082, places=4)
+            self.assertEqual(fill["quote_timestamp"], execution_quote.timestamp.isoformat())
+            self.assertEqual(json.loads(fill["order_book_json"])["asks"][0], ["6.10", 10000])
+
+    def test_matching_requires_post_approval_tick_and_depth(self):
+        created = datetime(2026, 9, 21, 9, 59, 30, tzinfo=SHANGHAI)
+        tick_at = datetime(2026, 9, 21, 10, 0, 0, tzinfo=SHANGHAI)
+        now = tick_at + timedelta(seconds=1)
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config()
+            ledger = PaperLedger(root / "paper.sqlite3")
+            ledger.initialize_account(cfg, created)
+            service = OrderService(cfg, ledger, StaticQuoteBroker(quote(tick_at)), root)
+            service.propose(intent("depth-check", "BUY", created), quote(tick_at), now)
+            service.approve("depth-check", "tester", "", now)
+            shallow = MarketQuote(**(
+                quote(tick_at + timedelta(seconds=2)).to_dict()
+                | {"ask_size": 299, "ask_levels": [["10.00", 299]]}
+            ))
+            service.broker.quote = shallow
+            result = service.execute("depth-check", now + timedelta(seconds=2))
+            self.assertEqual(result["status"], OrderStatus.SUBMITTED.value)
+            with ledger.connection() as con:
+                self.assertEqual(con.execute("SELECT COUNT(*) count FROM fills").fetchone()["count"], 0)
 
 
 if __name__ == "__main__":

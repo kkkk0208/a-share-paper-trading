@@ -42,6 +42,25 @@ class FeeConfig:
 
 
 @dataclass(frozen=True)
+class MatchingConfig:
+    min_depth_ratio: Decimal
+    min_ticks_delay: int
+    max_quote_age_seconds: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "min_depth_ratio", Decimal(str(self.min_depth_ratio)))
+        if self.min_depth_ratio <= 0 or self.min_ticks_delay < 0 or self.max_quote_age_seconds <= 0:
+            raise ValueError("invalid matching constraints")
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "min_depth_ratio": str(self.min_depth_ratio),
+            "min_ticks_delay": self.min_ticks_delay,
+            "max_quote_age_seconds": self.max_quote_age_seconds,
+        }
+
+
+@dataclass(frozen=True)
 class PaperConfig:
     account_id: str
     currency: str
@@ -54,12 +73,12 @@ class PaperConfig:
     max_total_exposure: Decimal
     min_cash_buffer: Decimal
     max_daily_loss: Decimal
-    max_quote_age_seconds: int
     approval_ttl_seconds: int
     lot_size: int
     max_participation_rate: Decimal
     slippage_bps: Decimal
     fees: FeeConfig
+    matching: MatchingConfig
     ruleset_version: str
 
     def __post_init__(self) -> None:
@@ -74,6 +93,8 @@ class PaperConfig:
             object.__setattr__(self, name, Decimal(str(getattr(self, name))))
         if isinstance(self.fees, dict):
             object.__setattr__(self, "fees", FeeConfig(**self.fees))
+        if isinstance(self.matching, dict):
+            object.__setattr__(self, "matching", MatchingConfig(**self.matching))
         object.__setattr__(self, "whitelist", tuple(self.whitelist))
         if not self.paper_mode:
             raise ValueError("paper_mode must remain true")
@@ -83,8 +104,8 @@ class PaperConfig:
             raise ValueError("initial_cash and lot_size must be positive")
         if not self.whitelist:
             raise ValueError("whitelist cannot be empty")
-        if self.max_quote_age_seconds <= 0 or self.approval_ttl_seconds <= 0:
-            raise ValueError("quote age and approval TTL must be positive")
+        if self.approval_ttl_seconds <= 0:
+            raise ValueError("approval TTL must be positive")
         if not (Decimal("0") < self.max_participation_rate <= Decimal("1")):
             raise ValueError("max_participation_rate must be in (0, 1]")
 
@@ -102,6 +123,8 @@ class PaperConfig:
                 result[key] = list(value)
             elif isinstance(value, FeeConfig):
                 result[key] = value.to_dict()
+            elif isinstance(value, MatchingConfig):
+                result[key] = value.to_dict()
         return result
 
 
@@ -118,6 +141,12 @@ def load_config(path: str | Path) -> PaperConfig:
             "stamp_duty_side": "SELL",
             "transfer_fee_rate": str(Decimal(str(data.pop("transfer_fee_bps"))) / Decimal("10000")),
             "transfer_fee_side": "BOTH",
+        }
+    if "matching" not in data:
+        data["matching"] = {
+            "min_depth_ratio": "3.0",
+            "min_ticks_delay": 1,
+            "max_quote_age_seconds": data.pop("max_quote_age_seconds"),
         }
     required = set(PaperConfig.__dataclass_fields__)
     missing = sorted(required - set(data))
