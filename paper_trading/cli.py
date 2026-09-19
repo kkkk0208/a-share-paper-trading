@@ -15,6 +15,7 @@ from .ledger import PaperLedger
 from .market_data import TencentPaperQuoteBroker
 from .models import MarketQuote, OrderSide, SignalIntent
 from .order_service import OrderService
+from .performance import calculate_performance
 from .reconciliation import reconcile
 from .report_adapter import paper_account_summary
 from .signal_adapter import load_intent
@@ -92,6 +93,10 @@ def parser() -> argparse.ArgumentParser:
     cancel = commands.add_parser("cancel")
     cancel.add_argument("--intent-id", required=True)
     cancel.add_argument("--reason", required=True)
+    commands.add_parser("snapshot")
+    perf = commands.add_parser("perf")
+    perf.add_argument("--from", dest="from_date", required=True)
+    perf.add_argument("--to", dest="to_date", required=True)
     return result
 
 
@@ -159,6 +164,23 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "cancel":
         print_json(ledger.cancel_intent(args.intent_id, args.reason, when))
+        return 0
+    if args.command == "snapshot":
+        broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
+        for position in ledger.positions(config.account_id):
+            ledger.save_quote(broker.latest_quote(position["symbol"]), when)
+        benchmark = broker.latest_quote(config.benchmark_symbol)
+        if benchmark.timestamp.astimezone().hour < 15:
+            raise ValueError("净值快照只能使用收盘后的基准行情")
+        result = ledger.record_equity_snapshot(
+            config.account_id, benchmark.timestamp.date(), benchmark.last, when,
+        )
+        print_json({"status": "SNAPSHOT_RECORDED", **result, "benchmark": config.benchmark_symbol})
+        return 0
+    if args.command == "perf":
+        print_json(calculate_performance(
+            ledger, config.account_id, date.fromisoformat(args.from_date), date.fromisoformat(args.to_date),
+        ))
         return 0
 
     if args.command == "propose":

@@ -132,8 +132,19 @@ CREATE TABLE IF NOT EXISTS fills (
     quote_snapshot_id TEXT NOT NULL,
     quote_timestamp TEXT,
     order_book_json TEXT,
+    realized_pnl TEXT NOT NULL DEFAULT '0.00',
     created_at TEXT NOT NULL,
     FOREIGN KEY (order_id) REFERENCES orders(order_id)
+);
+
+CREATE TABLE IF NOT EXISTS equity_curve (
+    account_id TEXT NOT NULL,
+    trade_date TEXT NOT NULL,
+    equity TEXT NOT NULL,
+    benchmark_close TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, trade_date),
+    FOREIGN KEY (account_id) REFERENCES accounts(account_id)
 );
 
 CREATE TABLE IF NOT EXISTS cash_ledger (
@@ -225,6 +236,8 @@ class PaperLedger:
                 con.execute("ALTER TABLE fills ADD COLUMN quote_timestamp TEXT")
             if "order_book_json" not in columns:
                 con.execute("ALTER TABLE fills ADD COLUMN order_book_json TEXT")
+            if "realized_pnl" not in columns:
+                con.execute("ALTER TABLE fills ADD COLUMN realized_pnl TEXT NOT NULL DEFAULT '0.00'")
         self.migrate_positions_to_lots()
 
     def migrate_positions_to_lots(self, now: datetime | None = None) -> int:
@@ -642,10 +655,10 @@ class PaperLedger:
             new_filled = order["filled_quantity"] + fill.quantity
             new_status = OrderStatus.FILLED.value if new_filled == order["quantity"] else OrderStatus.PARTIALLY_FILLED.value
             con.execute(
-                "INSERT INTO fills(fill_id,order_id,quantity,price,commission,stamp_tax,transfer_fee,quote_snapshot_id,quote_timestamp,order_book_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO fills(fill_id,order_id,quantity,price,commission,stamp_tax,transfer_fee,quote_snapshot_id,quote_timestamp,order_book_json,realized_pnl,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (unique_fill_id, order_id, fill.quantity, str(fill.price), str(fill.commission), str(fill.stamp_tax),
                  str(fill.transfer_fee), fill.quote_snapshot_id, fill.quote_timestamp.isoformat(),
-                 json.dumps(fill.order_book, ensure_ascii=False, sort_keys=True), now.isoformat()),
+                 json.dumps(fill.order_book, ensure_ascii=False, sort_keys=True), str(realized_delta), now.isoformat()),
             )
             con.execute(
                 "UPDATE accounts SET cash=?,realized_pnl=?,updated_at=? WHERE account_id=?",
@@ -699,3 +712,18 @@ class PaperLedger:
             "unrealized_pnl": money(unrealized),
             "positions": positions,
         }
+
+    def record_equity_snapshot(
+        self, account_id: str, trade_date: date, benchmark_close: Decimal,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        snapshot = self.status(account_id)
+        when = now or utc_now()
+        with self.transaction() as con:
+            con.execute(
+                "INSERT INTO equity_curve(account_id,trade_date,equity,benchmark_close,created_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(account_id,trade_date) DO UPDATE SET equity=excluded.equity,"
+                "benchmark_close=excluded.benchmark_close,created_at=excluded.created_at",
+                (account_id, trade_date.isoformat(), str(snapshot["equity"]), str(money(benchmark_close)), when.isoformat()),
+            )
+        return {"trade_date": trade_date, "equity": snapshot["equity"], "benchmark_close": money(benchmark_close)}

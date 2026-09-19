@@ -81,6 +81,7 @@ class PaperConfig:
     fees: FeeConfig
     matching: MatchingConfig
     quote_failover_failures: int
+    benchmark_symbol: str
     ruleset_version: str
 
     def __post_init__(self) -> None:
@@ -110,6 +111,8 @@ class PaperConfig:
             raise ValueError("approval and intent TTL must be positive")
         if self.quote_failover_failures <= 0:
             raise ValueError("quote_failover_failures must be positive")
+        if not self.benchmark_symbol.endswith((".SH", ".SZ")):
+            raise ValueError("benchmark_symbol must include exchange suffix")
         if not (Decimal("0") < self.max_participation_rate <= Decimal("1")):
             raise ValueError("max_participation_rate must be in (0, 1]")
 
@@ -139,6 +142,7 @@ def load_config(path: str | Path) -> PaperConfig:
     data = json.loads(source.read_text(encoding="utf-8"))
     data.setdefault("intent_ttl_minutes", 30)
     data.setdefault("quote_failover_failures", 3)
+    data.setdefault("benchmark_symbol", "000300.SH")
     if "fees" not in data:
         data["fees"] = {
             "commission_rate": str(Decimal(str(data.pop("commission_bps"))) / Decimal("10000")),

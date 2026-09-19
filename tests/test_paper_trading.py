@@ -14,6 +14,7 @@ from paper_trading.ledger import PaperLedger
 from paper_trading.market_data import FailoverQuoteProvider
 from paper_trading.models import MarketQuote, OrderSide, OrderStatus, SignalIntent
 from paper_trading.order_service import OrderService
+from paper_trading.performance import calculate_performance
 from paper_trading.reconciliation import reconcile
 
 
@@ -36,6 +37,7 @@ def config(**overrides) -> PaperConfig:
         "approval_ttl_seconds": 300,
         "intent_ttl_minutes": 30,
         "quote_failover_failures": 3,
+        "benchmark_symbol": "000300.SH",
         "lot_size": 100,
         "max_participation_rate": "0.10",
         "slippage_bps": "5",
@@ -115,6 +117,28 @@ class PaperTradingTests(unittest.TestCase):
         failed = FailoverQuoteProvider(FailingProvider(), SecondaryProvider(fail=True), failure_threshold=1)
         with self.assertRaisesRegex(RuntimeError, "all quote providers failed"):
             failed.latest_quote("002195.SZ")
+
+    def test_performance_uses_equity_curve_and_csi300(self):
+        with TemporaryDirectory() as temp:
+            cfg = config()
+            ledger = PaperLedger(Path(temp) / "paper.sqlite3")
+            ledger.initialize_account(cfg)
+            with ledger.transaction() as con:
+                con.executemany(
+                    "INSERT INTO equity_curve(account_id,trade_date,equity,benchmark_close,created_at) VALUES(?,?,?,?,?)",
+                    [
+                        (cfg.account_id, "2026-01-02", "100000", "4000", "2026-01-02T15:01:00+08:00"),
+                        (cfg.account_id, "2026-01-03", "90000", "3900", "2026-01-03T15:01:00+08:00"),
+                        (cfg.account_id, "2026-01-12", "110000", "4200", "2026-01-12T15:01:00+08:00"),
+                    ],
+                )
+            result = calculate_performance(
+                ledger, cfg.account_id, datetime(2026, 1, 1).date(), datetime(2026, 1, 31).date(),
+            )
+            self.assertEqual(result["cumulative_return"], Decimal("0.1"))
+            self.assertEqual(result["max_drawdown"], Decimal("-0.1"))
+            self.assertEqual(result["benchmark_return"], Decimal("0.05"))
+            self.assertEqual(result["excess_return"], Decimal("0.05"))
 
     def test_configuration_refuses_live_mode_and_unknown_adapter(self):
         with self.assertRaisesRegex(ValueError, "paper_mode"):
