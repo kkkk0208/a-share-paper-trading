@@ -15,6 +15,7 @@
   "max_daily_loss": "3000.00",
   "approval_ttl_seconds": 300,
   "intent_ttl_minutes": 30,
+  "quote_failover_failures": 3,
   "lot_size": 100,
   "max_participation_rate": "0.10",
   "slippage_bps": "5",

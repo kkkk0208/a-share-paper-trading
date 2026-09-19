@@ -36,9 +36,9 @@ def print_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=json_default))
 
 
-def load_quote(path: str | None, symbol: str) -> tuple[Any, MarketQuote]:
+def load_quote(path: str | None, symbol: str, failure_threshold: int = 3) -> tuple[Any, MarketQuote]:
     if not path:
-        broker = TencentPaperQuoteBroker()
+        broker = TencentPaperQuoteBroker(failure_threshold=failure_threshold)
         return broker, broker.latest_quote(symbol)
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     quote = MarketQuote(**data)
@@ -163,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "propose":
         intent = load_intent(args.intent)
-        broker, quote = load_quote(args.quote, intent.symbol)
+        broker, quote = load_quote(args.quote, intent.symbol, config.quote_failover_failures)
         service = OrderService(config, ledger, broker, runtime)
         print_json(service.propose(intent, quote, when))
         return 0
@@ -181,7 +181,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "execute":
         intent = ledger.get_intent(args.intent_id)
-        broker, _ = load_quote(getattr(args, "quote", None), intent.symbol)
+        broker, _ = load_quote(getattr(args, "quote", None), intent.symbol, config.quote_failover_failures)
         service = OrderService(config, ledger, broker, runtime)
         print_json(service.execute(args.intent_id, when))
         return 0

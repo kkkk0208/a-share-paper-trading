@@ -144,7 +144,7 @@ def service() -> tuple[PaperConfig, PaperLedger, OrderService]:
     config = load_config(CONFIG_PATH)
     ledger = PaperLedger(DB_PATH)
     ledger.initialize_account(config)
-    broker = TencentPaperQuoteBroker()
+    broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
     return config, ledger, OrderService(config, ledger, broker, RUNTIME_DIR)
 
 
@@ -182,7 +182,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/quote":
             try:
                 symbol = parse_qs(parsed.query).get("symbol", [""])[0]
-                quote = TencentPaperQuoteBroker().latest_quote(symbol)
+                threshold = load_config(CONFIG_PATH).quote_failover_failures if CONFIG_PATH.exists() else 3
+                quote = TencentPaperQuoteBroker(failure_threshold=threshold).latest_quote(symbol)
                 self.send_json(quote.to_dict())
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)

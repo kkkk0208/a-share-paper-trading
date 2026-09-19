@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 from paper_trading.broker import StaticQuoteBroker
 from paper_trading.config import PaperConfig
 from paper_trading.ledger import PaperLedger
+from paper_trading.market_data import FailoverQuoteProvider
 from paper_trading.models import MarketQuote, OrderSide, OrderStatus, SignalIntent
 from paper_trading.order_service import OrderService
 from paper_trading.reconciliation import reconcile
@@ -34,6 +35,7 @@ def config(**overrides) -> PaperConfig:
         "max_daily_loss": "3000.00",
         "approval_ttl_seconds": 300,
         "intent_ttl_minutes": 30,
+        "quote_failover_failures": 3,
         "lot_size": 100,
         "max_participation_rate": "0.10",
         "slippage_bps": "5",
@@ -89,6 +91,31 @@ def quote(at: datetime, bid: str = "10.00", ask: str = "10.00") -> MarketQuote:
 
 
 class PaperTradingTests(unittest.TestCase):
+    def test_quote_provider_fails_closed_then_switches_without_cache(self):
+        expected = quote(datetime(2026, 9, 21, 10, 0, tzinfo=SHANGHAI))
+
+        class FailingProvider:
+            def latest_quote(self, symbol):
+                raise RuntimeError("primary down")
+
+        class SecondaryProvider:
+            def __init__(self, fail=False):
+                self.fail = fail
+
+            def latest_quote(self, symbol):
+                if self.fail:
+                    raise RuntimeError("secondary down")
+                return expected
+
+        provider = FailoverQuoteProvider(FailingProvider(), SecondaryProvider(), failure_threshold=2)
+        with self.assertRaisesRegex(RuntimeError, "fail closed"):
+            provider.latest_quote("002195.SZ")
+        self.assertIs(provider.latest_quote("002195.SZ"), expected)
+
+        failed = FailoverQuoteProvider(FailingProvider(), SecondaryProvider(fail=True), failure_threshold=1)
+        with self.assertRaisesRegex(RuntimeError, "all quote providers failed"):
+            failed.latest_quote("002195.SZ")
+
     def test_configuration_refuses_live_mode_and_unknown_adapter(self):
         with self.assertRaisesRegex(ValueError, "paper_mode"):
             config(paper_mode=False)
