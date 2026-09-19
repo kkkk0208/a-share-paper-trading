@@ -53,9 +53,10 @@ class RiskEngine:
         check("tradable", quote.tradable, "证券当前不可交易")
         check("lot_size", intent.side == OrderSide.SELL or intent.quantity % self.config.lot_size == 0,
               f"买入数量必须是 {self.config.lot_size} 股整数倍")
-        if quote.limit_up is not None:
+        check("limit_prices_present", quote.limit_up is not None and quote.limit_down is not None,
+              "行情快照缺少涨停价或跌停价，按 fail closed 拒绝")
+        if quote.limit_up is not None and quote.limit_down is not None:
             check("upper_limit", intent.limit_price <= quote.limit_up, "委托价高于涨停价")
-        if quote.limit_down is not None:
             check("lower_limit", intent.limit_price >= quote.limit_down, "委托价低于跌停价")
         check("max_order_value", order_value <= self.config.max_order_value,
               f"订单金额 {order_value} 超过单笔上限 {self.config.max_order_value}")

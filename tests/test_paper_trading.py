@@ -177,6 +177,24 @@ class PaperTradingTests(unittest.TestCase):
             result = service.propose(intent("killed", "BUY", created), fresh, now)
             self.assertIn("一键停止", " ".join(result["rejection_reasons"]))
 
+    def test_missing_snapshot_limit_prices_fails_closed(self):
+        created = datetime(2026, 9, 21, 9, 59, 30, tzinfo=SHANGHAI)
+        now = datetime(2026, 9, 21, 10, 0, 0, tzinfo=SHANGHAI)
+        no_limits = MarketQuote(
+            symbol="002195.SZ", timestamp=now, last="10", bid="9.99", ask="10.01",
+            bid_size=1000, ask_size=1000, source="unit_test", tradable=True,
+            limit_up=None, limit_down=None, snapshot_id="no-limits",
+        )
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config()
+            ledger = PaperLedger(root / "paper.sqlite3")
+            ledger.initialize_account(cfg, created)
+            service = OrderService(cfg, ledger, StaticQuoteBroker(no_limits), root)
+            result = service.propose(intent("no-limits", "BUY", created), no_limits, now)
+            self.assertEqual(result["decision"], "REJECTED")
+            self.assertIn("缺少涨停价", " ".join(result["rejection_reasons"]))
+
     def test_changed_payload_cannot_reuse_intent_id(self):
         created = datetime(2026, 9, 21, 9, 59, 0, tzinfo=SHANGHAI)
         with TemporaryDirectory() as temp:
