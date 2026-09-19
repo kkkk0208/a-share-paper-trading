@@ -140,6 +140,32 @@ class PaperTradingTests(unittest.TestCase):
             self.assertEqual(result["benchmark_return"], Decimal("0.05"))
             self.assertEqual(result["excess_return"], Decimal("0.05"))
 
+    def test_corporate_action_adjusts_each_lot_once(self):
+        with TemporaryDirectory() as temp:
+            cfg = config()
+            ledger = PaperLedger(Path(temp) / "paper.sqlite3")
+            now = datetime(2026, 6, 1, 16, 0, tzinfo=SHANGHAI)
+            ledger.initialize_account(cfg, now)
+            with ledger.transaction() as con:
+                con.execute(
+                    "INSERT INTO position_lots(account_id,symbol,trade_date,quantity,cost_price,created_at) VALUES(?,?,?,?,?,?)",
+                    (cfg.account_id, "002195.SZ", "2026-05-01", 100, "10.00", now.isoformat()),
+                )
+            ledger.add_corporate_action(
+                "002195.SZ", datetime(2026, 6, 1).date(), Decimal("0.50"),
+                Decimal("0.10"), Decimal("1"), now,
+            )
+            applied = ledger.apply_corporate_actions(cfg.account_id, datetime(2026, 6, 1).date(), now)
+            self.assertEqual(applied[0]["quantity_after"], 110)
+            self.assertEqual(applied[0]["cash_dividend"], Decimal("50.00"))
+            self.assertEqual(ledger.account(cfg.account_id)["cash"], Decimal("100050.00"))
+            position = ledger.position(cfg.account_id, "002195.SZ", datetime(2026, 6, 2).date())
+            self.assertEqual(position["quantity"], 110)
+            self.assertEqual(position["average_cost"], Decimal("8.64"))
+            self.assertEqual(
+                ledger.apply_corporate_actions(cfg.account_id, datetime(2026, 6, 1).date(), now), []
+            )
+
     def test_configuration_refuses_live_mode_and_unknown_adapter(self):
         with self.assertRaisesRegex(ValueError, "paper_mode"):
             config(paper_mode=False)

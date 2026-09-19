@@ -147,6 +147,18 @@ CREATE TABLE IF NOT EXISTS equity_curve (
     FOREIGN KEY (account_id) REFERENCES accounts(account_id)
 );
 
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    ex_date TEXT NOT NULL,
+    cash_dividend TEXT NOT NULL DEFAULT '0',
+    stock_dividend TEXT NOT NULL DEFAULT '0',
+    split_ratio TEXT NOT NULL DEFAULT '1',
+    applied_at TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(symbol, ex_date)
+);
+
 CREATE TABLE IF NOT EXISTS cash_ledger (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     account_id TEXT NOT NULL,
@@ -727,3 +739,80 @@ class PaperLedger:
                 (account_id, trade_date.isoformat(), str(snapshot["equity"]), str(money(benchmark_close)), when.isoformat()),
             )
         return {"trade_date": trade_date, "equity": snapshot["equity"], "benchmark_close": money(benchmark_close)}
+
+    def add_corporate_action(
+        self, symbol: str, ex_date: date, cash_dividend: Decimal,
+        stock_dividend: Decimal, split_ratio: Decimal, now: datetime | None = None,
+    ) -> dict[str, Any]:
+        cash = Decimal(str(cash_dividend))
+        stock = Decimal(str(stock_dividend))
+        split = Decimal(str(split_ratio))
+        if cash < 0 or stock < 0 or split <= 0:
+            raise ValueError("corporate action values must be non-negative and split_ratio positive")
+        when = now or utc_now()
+        with self.transaction() as con:
+            con.execute(
+                "INSERT INTO corporate_actions(symbol,ex_date,cash_dividend,stock_dividend,split_ratio,created_at) "
+                "VALUES(?,?,?,?,?,?) ON CONFLICT(symbol,ex_date) DO UPDATE SET "
+                "cash_dividend=excluded.cash_dividend,stock_dividend=excluded.stock_dividend,"
+                "split_ratio=excluded.split_ratio,created_at=excluded.created_at "
+                "WHERE corporate_actions.applied_at IS NULL",
+                (symbol, ex_date.isoformat(), str(cash), str(stock), str(split), when.isoformat()),
+            )
+        return {"symbol": symbol, "ex_date": ex_date, "cash_dividend": cash,
+                "stock_dividend": stock, "split_ratio": split}
+
+    def apply_corporate_actions(
+        self, account_id: str, through_date: date, now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        when = now or utc_now()
+        applied: list[dict[str, Any]] = []
+        with self.transaction() as con:
+            actions = con.execute(
+                "SELECT * FROM corporate_actions WHERE applied_at IS NULL AND ex_date<=? ORDER BY ex_date,id",
+                (through_date.isoformat(),),
+            ).fetchall()
+            for action in actions:
+                lots = con.execute(
+                    "SELECT * FROM position_lots WHERE account_id=? AND symbol=? AND trade_date<? AND quantity>0 ORDER BY id",
+                    (account_id, action["symbol"], action["ex_date"]),
+                ).fetchall()
+                cash_dividend = Decimal(action["cash_dividend"])
+                stock_dividend = Decimal(action["stock_dividend"])
+                split_ratio = Decimal(action["split_ratio"])
+                factor = split_ratio * (Decimal("1") + stock_dividend)
+                cash_delta = Decimal("0")
+                old_total = 0
+                new_total = 0
+                for lot in lots:
+                    old_quantity = int(lot["quantity"])
+                    new_quantity = int((Decimal(old_quantity) * factor).to_integral_value(rounding="ROUND_FLOOR"))
+                    new_cost = max(Decimal("0"), (Decimal(str(lot["cost_price"])) - cash_dividend) / factor)
+                    con.execute(
+                        "UPDATE position_lots SET quantity=?,cost_price=? WHERE id=?",
+                        (new_quantity, str(new_cost), lot["id"]),
+                    )
+                    old_total += old_quantity
+                    new_total += new_quantity
+                    cash_delta += cash_dividend * old_quantity
+                if cash_delta:
+                    account = con.execute("SELECT cash FROM accounts WHERE account_id=?", (account_id,)).fetchone()
+                    if not account:
+                        raise KeyError(account_id)
+                    new_cash = money(Decimal(account["cash"]) + cash_delta)
+                    con.execute(
+                        "UPDATE accounts SET cash=?,updated_at=? WHERE account_id=?",
+                        (str(new_cash), when.isoformat(), account_id),
+                    )
+                    con.execute(
+                        "INSERT INTO cash_ledger(account_id,event_type,reference_id,amount,balance_after,created_at) VALUES(?,?,?,?,?,?)",
+                        (account_id, "CASH_DIVIDEND", f"CA-{action['id']}", str(money(cash_delta)),
+                         str(new_cash), when.isoformat()),
+                    )
+                con.execute("UPDATE corporate_actions SET applied_at=? WHERE id=?", (when.isoformat(), action["id"]))
+                applied.append({
+                    "id": action["id"], "symbol": action["symbol"], "ex_date": action["ex_date"],
+                    "lots_adjusted": len(lots), "quantity_before": old_total,
+                    "quantity_after": new_total, "cash_dividend": money(cash_delta),
+                })
+        return applied

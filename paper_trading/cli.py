@@ -97,6 +97,14 @@ def parser() -> argparse.ArgumentParser:
     perf = commands.add_parser("perf")
     perf.add_argument("--from", dest="from_date", required=True)
     perf.add_argument("--to", dest="to_date", required=True)
+    corp_add = commands.add_parser("corp-add")
+    corp_add.add_argument("--symbol", required=True)
+    corp_add.add_argument("--ex-date", required=True)
+    corp_add.add_argument("--cash-dividend", default="0")
+    corp_add.add_argument("--stock-dividend", default="0")
+    corp_add.add_argument("--split-ratio", default="1")
+    corp_apply = commands.add_parser("corp-apply")
+    corp_apply.add_argument("--through", required=True)
     return result
 
 
@@ -181,6 +189,16 @@ def main(argv: list[str] | None = None) -> int:
         print_json(calculate_performance(
             ledger, config.account_id, date.fromisoformat(args.from_date), date.fromisoformat(args.to_date),
         ))
+        return 0
+    if args.command == "corp-add":
+        print_json(ledger.add_corporate_action(
+            args.symbol, date.fromisoformat(args.ex_date), Decimal(args.cash_dividend),
+            Decimal(args.stock_dividend), Decimal(args.split_ratio), when,
+        ))
+        return 0
+    if args.command == "corp-apply":
+        applied = ledger.apply_corporate_actions(config.account_id, date.fromisoformat(args.through), when)
+        print_json({"status": "APPLIED", "count": len(applied), "actions": applied})
         return 0
 
     if args.command == "propose":
