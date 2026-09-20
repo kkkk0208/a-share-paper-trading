@@ -81,14 +81,17 @@ class BacktestTests(unittest.TestCase):
         self.assertLess(pieces["validation"].index[-1], pieces["test"].index[0])
         metrics = segmented_metrics(result.equity_curve, result.trades, test_config.splits)
         self.assertEqual(
-            {"full", "train", "validation", "test", "segmentation_check", "warnings"},
+            {
+                "full", "train", "validation", "test", "segmentation_check",
+                "strategy_vs_buy_and_hold_by_segment", "ending_date_sensitivity_last_60", "warnings",
+            },
             set(metrics),
         )
         self.assertIsNone(metrics["full"]["annualized_return"])
         self.assertIsNone(metrics["full"]["sharpe_ratio"])
         self.assertTrue(metrics["segmentation_check"]["passed"])
         self.assertLessEqual(metrics["segmentation_check"]["chain_error"], 0.001)
-        self.assertIn("realized_pnl", metrics["full"])
+        self.assertIn("realized_pnl_in_period", metrics["full"])
         self.assertIn("unrealized_pnl_at_period_end", metrics["full"])
         self.assertIn("open_positions_at_period_end", metrics["full"])
         self.assertIn("buy_and_hold_return", metrics["full"])
@@ -113,17 +116,44 @@ class BacktestTests(unittest.TestCase):
             "benchmark_equity": [100000.0] * 61,
             "buy_and_hold_equity": [100000.0] * 61,
             "unrealized_pnl": [0.0] * 60 + [25000.0],
-            "open_positions": ["[]"] * 60 + ['[{"symbol":"000001.SZ","quantity":100}]'],
+            "open_positions": ["[]"] * 60 + ['[{"symbol":"000001.SZ","quantity":100,"unrealized_pnl":25000.0}]'],
         }, index=dates)
         trades = pd.DataFrame([{
-            "side": "SELL", "realized_pnl": -5000.0, "total_fees": 10.0,
+            "symbol": "000001.SZ", "side": "SELL", "quantity": 100,
+            "realized_pnl": -5000.0, "total_fees": 10.0,
             "notional": 10000.0, "execution_date": dates[-1].date().isoformat(),
         }])
         metrics = calculate_metrics(curve, trades, Decimal("0.018"))
-        self.assertEqual(-5000.0, metrics["realized_pnl"])
+        self.assertEqual(-5000.0, metrics["realized_pnl_in_period"])
         self.assertEqual(25000.0, metrics["unrealized_pnl_at_period_end"])
         self.assertEqual("000001.SZ", metrics["open_positions_at_period_end"][0]["symbol"])
-        self.assertTrue(any("超过 30%" in item for item in metrics["warnings"]))
+        self.assertTrue(metrics["unrealized_pnl_dominates_period"])
+
+    def test_carry_in_unrealized_is_removed_from_period_realized_pnl(self) -> None:
+        dates = pd.date_range("2024-01-02", periods=61, freq="B")
+        base = pd.Series({
+            "equity": 110000.0, "benchmark_equity": 100000.0,
+            "buy_and_hold_equity": 100000.0, "unrealized_pnl": 10000.0,
+            "open_positions": '[{"symbol":"000001.SZ","quantity":100,"unrealized_pnl":10000.0}]',
+        }, name=pd.Timestamp("2024-01-01"))
+        curve = pd.DataFrame({
+            "equity": [110000.0] * 60 + [115000.0],
+            "benchmark_equity": [100000.0] * 61,
+            "buy_and_hold_equity": [100000.0] * 61,
+            "unrealized_pnl": [10000.0] * 60 + [0.0],
+            "open_positions": [base["open_positions"]] * 60 + ["[]"],
+        }, index=dates)
+        trades = pd.DataFrame([{
+            "symbol": "000001.SZ", "side": "SELL", "quantity": 100,
+            "realized_pnl": 15000.0, "total_fees": 10.0, "notional": 115000.0,
+            "execution_date": dates[-1].date().isoformat(),
+        }])
+        metrics = calculate_metrics(curve, trades, base_row=base)
+        self.assertEqual(10000.0, metrics["carry_in_unrealized_pnl"])
+        self.assertEqual(15000.0, metrics["lifecycle_realized_pnl_closed_in_period"])
+        self.assertEqual(5000.0, metrics["realized_pnl_in_period"])
+        self.assertEqual(0.0, metrics["unrealized_pnl_in_period"])
+        self.assertTrue(metrics["pnl_attribution_check"]["passed"])
 
     def test_cache_and_config_are_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -156,8 +186,12 @@ class BacktestTests(unittest.TestCase):
                 {path.name for path in output.iterdir()},
             )
             manifest = json.loads((output / "run_manifest.json").read_text(encoding="utf-8"))
+            summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual("daily close", manifest["signal_timing"])
             self.assertEqual(64, len(manifest["source_sha256"]["000001.SZ"]))
+            self.assertEqual(Decimal("0.5"), Decimal(str(summary["strategy_configuration"]["max_single_weight"])))
+            self.assertIn("total_traded_notional", summary["full"])
+            self.assertIn("annualized_fee_drag", summary["full"])
 
 
 if __name__ == "__main__":

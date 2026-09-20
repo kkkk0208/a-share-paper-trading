@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -58,7 +59,15 @@ def run(args: argparse.Namespace) -> int:
     result = run_backtest(config, histories, benchmark)
     summary = segmented_metrics(
         result.equity_curve, result.trades, config.splits, config.risk_free_rate_annual,
+        config.fees,
     )
+    summary["strategy_configuration"] = {
+        "position_sizing": "each new position targets max_single_weight of opening equity",
+        "max_positions": min(
+            len(config.symbols), math.floor(1 / float(config.execution.max_position_weight)),
+        ),
+        "max_single_weight": float(config.execution.max_position_weight),
+    }
     warnings = list(result.warnings) + list(summary["warnings"])
     warnings.append("ma_cross_v1 参数固定且未在 train 上拟合；三段当前只代表不同市场阶段")
     if config.universe_definition == "manually_selected_demo_symbols":

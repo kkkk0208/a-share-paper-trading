@@ -43,17 +43,27 @@
 
 少于 60 个交易日的全样本或分段不会输出年化收益、年化波动率和夏普，只保留累计收益、回撤及交易统计。费用费率统一维护在 `config/fees.json`，不再在模拟盘和回测配置中各存一份。
 
-`summary.json` 会把 `realized_pnl`、`unrealized_pnl_at_period_end` 和 `open_positions_at_period_end` 分开。期末浮盈占本期总盈亏超过 30% 时写入警告，避免把未平仓敞口描述成已经赚到的钱。费用同时输出 `total_fees_paid` 及其占期初权益比例。
+`summary.json` 会把全生命周期平仓盈亏、本期已实现贡献、本期未实现变动和期末持仓分开。跨分段持仓的期初浮盈记录在 `carry_in_unrealized_pnl`；平仓后会从全生命周期盈亏中扣除这部分，得到 `realized_pnl_in_period`。严格自检采用 `realized_pnl_in_period + unrealized_pnl_in_period = 期末权益 - 期初权益`，误差超过 0.01 元整次运行失败。这里不能再把 `carry_in_unrealized_pnl` 加到右侧，因为它已经在期初权益中。
+
+当本期已实现与未实现盈亏异号时，`unrealized_pnl_share_of_period_total` 输出 `null`，避免产生大于 100% 且容易误读的“占比”；同时用 `mixed_realized_unrealized_signs` 和 `unrealized_pnl_dominates_period` 明示风险。validation 空仓时该占比为 `0.0`。`top1_trade_pnl_share` 和 `top3_trade_pnl_share` 按正贡献交易（包括期末未平仓贡献）占本期净盈亏计算；由于亏损会抵消盈利，该集中度允许超过 100%。
+
+`ending_date_sensitivity_last_60` 固定 test 期初权益，把最后 60 个交易日逐日当作回测终点，输出 test 累计收益的最小值、中位数、最大值和负收益终点数量。最低值为负时写入警告。这是终点敏感性检查，不等同于对每个终点重新选参。
 
 单标的的 `buy_and_hold_return` 就是该股票同期买入持有收益；多标的是期初等权、此后不再调仓的买入持有篮子。它用于判断择时规则是否真的优于持有标的本身。
 
 指数基准使用包含税前现金分红再投资的沪深 300 全收益指数 `H00300`，不再使用价格指数 `000300`。`excess_return` 采用几何相对收益 `(1+组合收益)/(1+基准收益)-1`，不是两个多年累计收益直接相减。
 
-夏普默认使用配置里的年化无风险利率 1.8%，并按 252 个交易日换算。`turnover` 定义为双边成交金额合计除以期间平均每日权益。
+夏普默认使用配置里的年化无风险利率 1.8%，其分子为日算术平均超额收益并按 252 个交易日年化；`annualized_return` 则是几何 CAGR，两者不能互相反推。`turnover` 定义为双边成交金额合计除以期间平均每日权益。
+
+费用审计同时输出 `total_traded_notional`、`average_daily_equity`、`effective_fee_rate`、`expected_fee_rate` 和 `annualized_fee_drag`。理论费率会按每笔成交、方向和最低佣金从共享费用模块重算；实际值与理论值相差超过 10% 时报警。年化费用拖累定义为 `总费用 / 平均每日权益 / 样本年数`，用于跨分段比较。
+
+`strategy_configuration` 固化本轮仓位规则：每笔新仓按开盘权益的 `max_single_weight` 定仓，并列出当前股票池与权重上限共同允许的 `max_positions`。这只是配置上限；同时触发、现金和成交量约束可能使实际仓位更低。
 
 训练、验证和测试段的第一天收益以前一段最后一个收盘权益为基数；输出会执行链乘自检，三段复利与全样本累计收益偏差超过 0.1% 时整次运行失败。当前 `ma_cross_v1` 参数是预先固定的，没有在训练集拟合，因此三段目前只是不同市场阶段；开始调参后，测试集只能在方案冻结后查看一次。
 
 示例中的两只股票来自手工指定的演示列表，不是预先声明的全市场选股规则，因此存在选择偏差。正式研究必须先固定股票池和选股规则，再对完整股票池运行，不能根据已知历史表现挑标的。
+
+每个 train、validation、test 分段都单独输出 `strategy_vs_buy_and_hold_return`。它只回答“在这组手工标的上择时是否优于一直持有”，不能消除股票池本身的选择偏差，也不能外推到全市场。
 
 ## 把示例换成你的策略
 
