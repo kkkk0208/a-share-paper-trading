@@ -1,0 +1,24 @@
+{
+  "symbols": ["002195.SZ", "002815.SZ"],
+  "benchmark_symbol": "000300.SH",
+  "start_date": "2022-01-01",
+  "end_date": "2026-09-18",
+  "initial_cash": "100000",
+  "price_adjustment": "qfq",
+  "strategy": {"name": "ma_cross_v1", "short_window": 5, "long_window": 20},
+  "execution": {
+    "lot_size": 100,
+    "slippage_bps": "5",
+    "max_position_weight": "0.45",
+    "max_volume_participation": "0.01"
+  },
+  "fees": {
+    "commission_rate": "0.00025",
+    "commission_min": "5.0",
+    "stamp_duty_rate": "0.0005",
+    "stamp_duty_side": "SELL",
+    "transfer_fee_rate": "0.00001",
+    "transfer_fee_side": "BOTH"
+  },
+  "splits": {"train": "0.60", "validation": "0.20", "test": "0.20"}
+}

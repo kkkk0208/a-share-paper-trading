@@ -1,4 +1,5 @@
 runtime/paper_trading/
+runtime/backtesting/
 config/paper_trading.json
 __pycache__/
 *.pyc
