@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP
+import json
 
 import pandas as pd
 
@@ -106,6 +107,10 @@ def run_backtest(
     curve_rows: list[dict[str, object]] = []
     last_close: dict[str, Decimal] = {}
     benchmark_base = Decimal(str(benchmark.iloc[0]["close"]))
+    buy_hold_bases = {
+        symbol: Decimal(str(frame.iloc[0]["close"])) for symbol, frame in frames.items()
+    }
+    buy_hold_marks = dict(buy_hold_bases)
     slip = config.execution.slippage_bps / Decimal("10000")
 
     for timestamp in benchmark.index:
@@ -197,18 +202,43 @@ def run_backtest(
                     })
 
         market_value = Decimal("0")
+        unrealized_pnl = Decimal("0")
+        open_positions: list[dict[str, object]] = []
         for symbol, position in positions.items():
             frame = frames[symbol]
             if timestamp in frame.index:
                 last_close[symbol] = Decimal(str(frame.at[timestamp, "close"]))
-            market_value += money(last_close.get(symbol, position.entry_price) * position.quantity)
+            mark = last_close.get(symbol, position.entry_price)
+            position_value = money(mark * position.quantity)
+            position_unrealized = money(
+                (mark - position.entry_price) * position.quantity - position.remaining_entry_fees
+            )
+            market_value += position_value
+            unrealized_pnl += position_unrealized
+            open_positions.append({
+                "symbol": symbol,
+                "quantity": position.quantity,
+                "cost_price": float(position.entry_price),
+                "close": float(mark),
+                "market_value": float(position_value),
+                "unrealized_pnl": float(position_unrealized),
+            })
         equity = money(cash + market_value)
         benchmark_close = Decimal(str(benchmark.at[timestamp, "close"]))
         benchmark_equity = money(config.initial_cash * benchmark_close / benchmark_base)
+        buy_hold_equity = Decimal("0")
+        equal_allocation = config.initial_cash / Decimal(len(config.symbols))
+        for symbol in config.symbols:
+            if timestamp in frames[symbol].index:
+                buy_hold_marks[symbol] = Decimal(str(frames[symbol].at[timestamp, "close"]))
+            buy_hold_equity += equal_allocation * buy_hold_marks[symbol] / buy_hold_bases[symbol]
         curve_rows.append({
             "date": trade_date.isoformat(), "cash": float(cash),
             "market_value": float(market_value), "equity": float(equity),
             "benchmark_equity": float(benchmark_equity),
+            "buy_and_hold_equity": float(money(buy_hold_equity)),
+            "unrealized_pnl": float(money(unrealized_pnl)),
+            "open_positions": json.dumps(open_positions, ensure_ascii=False, sort_keys=True),
         })
 
         # Signals are observed only after the closing mark and become pending for a

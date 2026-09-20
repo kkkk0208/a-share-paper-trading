@@ -92,11 +92,22 @@ class AkShareHistoryDownloader:
     def download_benchmark(self, symbol: str, start: str, end: str) -> Path:
         import akshare as ak
 
-        prefix = symbol.split(".", 1)[1].lower() + symbol.split(".", 1)[0]
-        try:
-            frame = ak.stock_zh_index_daily_em(symbol=prefix, start_date=start.replace("-", ""), end_date=end.replace("-", ""))
-        except Exception:
-            frame = ak.stock_zh_index_daily_tx(symbol=prefix)
+        code, exchange = symbol.split(".", 1)
+        if code.startswith(("H", "N")):
+            raw = ak.stock_zh_index_hist_csindex(
+                symbol=code, start_date=start.replace("-", ""), end_date=end.replace("-", ""),
+            )
+            close = pd.to_numeric(raw.iloc[:, 9], errors="coerce")
+            frame = pd.DataFrame({
+                "date": raw.iloc[:, 0], "open": close, "high": close,
+                "low": close, "close": close, "volume": 0,
+            })
+        else:
+            prefix = exchange.lower() + code
+            try:
+                frame = ak.stock_zh_index_daily_em(symbol=prefix, start_date=start.replace("-", ""), end_date=end.replace("-", ""))
+            except Exception:
+                frame = ak.stock_zh_index_daily_tx(symbol=prefix)
         # Some index endpoints expose only turnover amount, while the engine needs
         # benchmark close prices only. Keep the common cache schema with a neutral
         # volume value instead of confusing turnover amount with share volume.
@@ -106,6 +117,7 @@ class AkShareHistoryDownloader:
             frame["volume"] = 0
         normalized = normalize_history(frame)
         normalized = normalized.loc[pd.Timestamp(start):pd.Timestamp(end)]
+        normalized = normalized[normalized.index.dayofweek < 5]
         path = self.store.save(symbol, normalized.reset_index())
         self.store.record_download(symbol, path)
         if self.calendar_path:

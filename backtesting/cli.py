@@ -20,6 +20,18 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _round_numbers(value: object) -> object:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, float):
+        return round(value, 6)
+    if isinstance(value, dict):
+        return {key: _round_numbers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_round_numbers(item) for item in value]
+    return value
+
+
 def download(args: argparse.Namespace) -> int:
     config = load_backtest_config(args.config)
     store = CachedHistoryStore(args.cache_dir)
@@ -44,8 +56,15 @@ def run(args: argparse.Namespace) -> int:
     histories = {symbol: store.load(symbol) for symbol in config.symbols}
     benchmark = store.load(config.benchmark_symbol)
     result = run_backtest(config, histories, benchmark)
-    summary = segmented_metrics(result.equity_curve, result.trades, config.splits)
-    summary["warnings"] = list(result.warnings)
+    summary = segmented_metrics(
+        result.equity_curve, result.trades, config.splits, config.risk_free_rate_annual,
+    )
+    warnings = list(result.warnings) + list(summary["warnings"])
+    warnings.append("ma_cross_v1 参数固定且未在 train 上拟合；三段当前只代表不同市场阶段")
+    if config.universe_definition == "manually_selected_demo_symbols":
+        warnings.append("标的是手工选择的演示股票，结果存在选择偏差，不能外推到全市场")
+    summary["warnings"] = warnings
+    summary = _round_numbers(summary)
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -64,6 +83,8 @@ def run(args: argparse.Namespace) -> int:
         "signal_timing": "daily close",
         "execution_timing": "next available trading-day open",
         "research_status": "example strategy; not evidence of future performance",
+        "parameter_selection": "none; ma_cross_v1 parameters were fixed before the run",
+        "universe_definition": config.universe_definition,
     }
     (output / "run_manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))

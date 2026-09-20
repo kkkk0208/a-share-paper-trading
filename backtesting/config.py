@@ -72,12 +72,15 @@ class BacktestConfig:
     execution: ExecutionConfig
     fees: FeeConfig
     splits: SplitConfig
+    risk_free_rate_annual: Decimal = Decimal("0.018")
+    universe_definition: str = "manually_selected_demo_symbols"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "symbols", tuple(self.symbols))
         object.__setattr__(self, "start_date", date.fromisoformat(self.start_date) if isinstance(self.start_date, str) else self.start_date)
         object.__setattr__(self, "end_date", date.fromisoformat(self.end_date) if isinstance(self.end_date, str) else self.end_date)
         object.__setattr__(self, "initial_cash", Decimal(str(self.initial_cash)))
+        object.__setattr__(self, "risk_free_rate_annual", Decimal(str(self.risk_free_rate_annual)))
         for name, cls in (("strategy", StrategyConfig), ("execution", ExecutionConfig), ("fees", FeeConfig), ("splits", SplitConfig)):
             value = getattr(self, name)
             if isinstance(value, dict):
@@ -90,6 +93,8 @@ class BacktestConfig:
             raise ValueError("invalid date range or initial cash")
         if self.price_adjustment not in {"qfq", "hfq", "none"}:
             raise ValueError("price_adjustment must be qfq, hfq or none")
+        if self.risk_free_rate_annual < 0 or not self.universe_definition.strip():
+            raise ValueError("invalid risk-free rate or universe definition")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,6 +108,8 @@ class BacktestConfig:
             },
             "fees": self.fees.to_dict(),
             "splits": {key: str(value) for key, value in self.splits.__dict__.items()},
+            "risk_free_rate_annual": str(self.risk_free_rate_annual),
+            "universe_definition": self.universe_definition,
         }
 
 

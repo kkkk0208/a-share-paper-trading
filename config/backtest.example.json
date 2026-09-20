@@ -1,6 +1,6 @@
 {
   "symbols": ["002195.SZ", "002815.SZ"],
-  "benchmark_symbol": "000300.SH",
+  "benchmark_symbol": "H00300.SH",
   "start_date": "2022-01-01",
   "end_date": "2026-09-18",
   "initial_cash": "100000",
@@ -13,5 +13,7 @@
     "max_volume_participation": "0.01",
     "suspension_warning_days": 5
   },
-  "splits": {"train": "0.60", "validation": "0.20", "test": "0.20"}
+  "splits": {"train": "0.60", "validation": "0.20", "test": "0.20"},
+  "risk_free_rate_annual": "0.018",
+  "universe_definition": "manually_selected_demo_symbols"
 }

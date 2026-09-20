@@ -15,7 +15,7 @@ from backtesting.config import BacktestConfig, ExecutionConfig, SplitConfig, Str
 from backtesting.cli import run as cli_run
 from backtesting.data import CachedHistoryStore, normalize_history
 from backtesting.engine import run_backtest
-from backtesting.metrics import chronological_slices, segmented_metrics
+from backtesting.metrics import calculate_metrics, chronological_slices, segmented_metrics
 from paper_trading.config import FeeConfig
 
 
@@ -80,9 +80,19 @@ class BacktestTests(unittest.TestCase):
         self.assertLess(pieces["train"].index[-1], pieces["validation"].index[0])
         self.assertLess(pieces["validation"].index[-1], pieces["test"].index[0])
         metrics = segmented_metrics(result.equity_curve, result.trades, test_config.splits)
-        self.assertEqual({"full", "train", "validation", "test"}, set(metrics))
+        self.assertEqual(
+            {"full", "train", "validation", "test", "segmentation_check", "warnings"},
+            set(metrics),
+        )
         self.assertIsNone(metrics["full"]["annualized_return"])
-        self.assertIsNone(metrics["full"]["sharpe_ratio_rf0"])
+        self.assertIsNone(metrics["full"]["sharpe_ratio"])
+        self.assertTrue(metrics["segmentation_check"]["passed"])
+        self.assertLessEqual(metrics["segmentation_check"]["chain_error"], 0.001)
+        self.assertIn("realized_pnl", metrics["full"])
+        self.assertIn("unrealized_pnl_at_period_end", metrics["full"])
+        self.assertIn("open_positions_at_period_end", metrics["full"])
+        self.assertIn("buy_and_hold_return", metrics["full"])
+        self.assertIn("total_fees_paid", metrics["full"])
 
     def test_limit_up_open_skips_buy_and_history_gap_warns(self) -> None:
         stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 13.2, 13, 6, 8])
@@ -95,6 +105,25 @@ class BacktestTests(unittest.TestCase):
         result = run_backtest(test_config, {"000001.SZ": stock}, frame([100] * 6))
         self.assertTrue(result.trades.empty or result.trades.iloc[0]["execution_date"] != "2024-01-04")
         self.assertTrue(any("history gap" in item for item in result.warnings))
+
+    def test_unrealized_pnl_dominance_is_explicitly_warned(self) -> None:
+        dates = pd.date_range("2024-01-02", periods=61, freq="B")
+        curve = pd.DataFrame({
+            "equity": [100000.0] * 60 + [120000.0],
+            "benchmark_equity": [100000.0] * 61,
+            "buy_and_hold_equity": [100000.0] * 61,
+            "unrealized_pnl": [0.0] * 60 + [25000.0],
+            "open_positions": ["[]"] * 60 + ['[{"symbol":"000001.SZ","quantity":100}]'],
+        }, index=dates)
+        trades = pd.DataFrame([{
+            "side": "SELL", "realized_pnl": -5000.0, "total_fees": 10.0,
+            "notional": 10000.0, "execution_date": dates[-1].date().isoformat(),
+        }])
+        metrics = calculate_metrics(curve, trades, Decimal("0.018"))
+        self.assertEqual(-5000.0, metrics["realized_pnl"])
+        self.assertEqual(25000.0, metrics["unrealized_pnl_at_period_end"])
+        self.assertEqual("000001.SZ", metrics["open_positions_at_period_end"][0]["symbol"])
+        self.assertTrue(any("超过 30%" in item for item in metrics["warnings"]))
 
     def test_cache_and_config_are_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
