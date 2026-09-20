@@ -15,7 +15,7 @@ from .risk_engine import RiskEngine
 class OrderService:
     def __init__(
         self, config: PaperConfig, ledger: PaperLedger, broker: PaperBroker,
-        runtime_dir: str | Path,
+        runtime_dir: str | Path, calendar_path: str | Path | None = None,
     ) -> None:
         if not getattr(broker, "paper_only", False):
             raise ValueError("broker does not declare paper_only")
@@ -25,7 +25,7 @@ class OrderService:
         self.ledger = ledger
         self.broker = broker
         self.runtime_dir = Path(runtime_dir)
-        self.risk = RiskEngine(config, ledger, runtime_dir)
+        self.risk = RiskEngine(config, ledger, runtime_dir, calendar_path)
         self.matcher = PaperMatcher(config)
 
     def propose(self, intent: SignalIntent, quote: MarketQuote, now: datetime) -> dict[str, Any]:

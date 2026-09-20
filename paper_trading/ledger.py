@@ -740,6 +740,72 @@ class PaperLedger:
             )
         return {"trade_date": trade_date, "equity": snapshot["equity"], "benchmark_close": money(benchmark_close)}
 
+    def record_equity_snapshot_with_prices(
+        self, account_id: str, trade_date: date, benchmark_close: Decimal,
+        prices: dict[str, Decimal], now: datetime | None = None,
+    ) -> dict[str, Any]:
+        account = self.account(account_id)
+        positions = self.positions(account_id)
+        missing = [row["symbol"] for row in positions if row["symbol"] not in prices]
+        if missing:
+            raise ValueError(f"缺少历史收盘价: {', '.join(missing)}")
+        market_value = sum(
+            (money(prices[row["symbol"]] * row["quantity"]) for row in positions),
+            money(0),
+        )
+        equity = money(account["cash"] + market_value)
+        when = now or utc_now()
+        with self.transaction() as con:
+            con.execute(
+                "INSERT INTO equity_curve(account_id,trade_date,equity,benchmark_close,created_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(account_id,trade_date) DO UPDATE SET equity=excluded.equity,"
+                "benchmark_close=excluded.benchmark_close,created_at=excluded.created_at",
+                (account_id, trade_date.isoformat(), str(equity), str(money(benchmark_close)), when.isoformat()),
+            )
+        return {"trade_date": trade_date, "equity": equity, "benchmark_close": money(benchmark_close)}
+
+    def latest_market_date(self) -> date | None:
+        with self.connection() as con:
+            row = con.execute("SELECT MAX(timestamp) timestamp FROM market_snapshots").fetchone()
+        return None if not row or not row["timestamp"] else datetime.fromisoformat(row["timestamp"]).date()
+
+    def account_created_date(self, account_id: str) -> date:
+        return datetime.fromisoformat(self.account(account_id)["created_at"]).date()
+
+    def snapshot_dates(self, account_id: str, start: date, end: date) -> set[date]:
+        with self.connection() as con:
+            rows = con.execute(
+                "SELECT trade_date FROM equity_curve WHERE account_id=? AND trade_date BETWEEN ? AND ?",
+                (account_id, start.isoformat(), end.isoformat()),
+            ).fetchall()
+        return {date.fromisoformat(row["trade_date"]) for row in rows}
+
+    def close_prices_from_quotes(self, symbols: list[str], trade_date: date) -> dict[str, Decimal]:
+        result: dict[str, Decimal] = {}
+        with self.connection() as con:
+            for symbol in symbols:
+                row = con.execute(
+                    "SELECT last FROM market_snapshots WHERE symbol=? AND date(timestamp)=? "
+                    "ORDER BY timestamp DESC LIMIT 1",
+                    (symbol, trade_date.isoformat()),
+                ).fetchone()
+                if row:
+                    result[symbol] = money(row["last"])
+        return result
+
+    def historical_state_changed_after(self, account_id: str, trade_date: date) -> bool:
+        with self.connection() as con:
+            fill = con.execute(
+                "SELECT 1 FROM fills f JOIN orders o ON o.order_id=f.order_id "
+                "WHERE date(f.quote_timestamp)>? LIMIT 1",
+                (trade_date.isoformat(),),
+            ).fetchone()
+            action = con.execute(
+                "SELECT 1 FROM corporate_actions WHERE applied_at IS NOT NULL AND ex_date>? LIMIT 1",
+                (trade_date.isoformat(),),
+            ).fetchone()
+        return bool(fill or action)
+
     def add_corporate_action(
         self, symbol: str, ex_date: date, cash_dividend: Decimal,
         stock_dividend: Decimal, split_ratio: Decimal, now: datetime | None = None,
@@ -773,6 +839,16 @@ class PaperLedger:
                 (through_date.isoformat(),),
             ).fetchall()
             for action in actions:
+                later_fill = con.execute(
+                    "SELECT f.quote_timestamp FROM fills f JOIN orders o ON o.order_id=f.order_id "
+                    "WHERE o.symbol=? AND date(f.quote_timestamp)>=? ORDER BY f.quote_timestamp LIMIT 1",
+                    (action["symbol"], action["ex_date"]),
+                ).fetchone()
+                if later_fill:
+                    raise ValueError(
+                        f"公司行动 {action['symbol']} {action['ex_date']} 晚于或等于已有成交 "
+                        f"{later_fill['quote_timestamp']}，拒绝事后调整；请从备份重建账本"
+                    )
                 lots = con.execute(
                     "SELECT * FROM position_lots WHERE account_id=? AND symbol=? AND trade_date<? AND quantity>0 ORDER BY id",
                     (account_id, action["symbol"], action["ex_date"]),

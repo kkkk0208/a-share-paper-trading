@@ -85,7 +85,7 @@ function renderDashboard(data) {
       <div class="approval-metric"><span>数量</span><b>${number.format(row.quantity)} 股</b></div>
       <div class="approval-metric"><span>限价</span><b>${money.format(row.limit_price)}</b></div>
       <div class="approval-metric"><span>有效期</span><b>${esc(formatTime(row.valid_until))}</b></div>
-      <div class="approval-actions">${canApprove ? `<button class="button primary" data-action="approve" data-id="${esc(row.intent_id)}">批准</button><button class="button ghost" data-action="reject" data-id="${esc(row.intent_id)}">拒绝</button>` : ""}${canExecute ? `<button class="button primary" data-action="execute" data-id="${esc(row.intent_id)}">模拟执行</button>` : ""}</div>
+      <div class="approval-actions">${canApprove ? `<button class="button primary" data-action="approve" data-id="${esc(row.intent_id)}" data-symbol="${esc(row.symbol)}" data-quantity="${esc(row.quantity)}">批准</button><button class="button ghost" data-action="reject" data-id="${esc(row.intent_id)}">拒绝</button>` : ""}${canExecute ? `<button class="button primary" data-action="execute" data-id="${esc(row.intent_id)}">模拟执行</button>` : ""}</div>
     </article>`;
   }).join("");
 
@@ -279,15 +279,16 @@ function registerWebMcpTools() {
     description: "对一个明确的交易建议执行批准、拒绝或模拟成交。execute 仅在已批准后才可执行，并仍会经过风控。",
     inputSchema: {
       type: "object",
-      properties: { action: { type: "string", enum: ["approve", "reject", "execute"] }, intent_id: { type: "string" } },
+      properties: { action: { type: "string", enum: ["approve", "reject", "execute"] }, intent_id: { type: "string" }, confirmation: { type: "string", description: "批准时必须输入股票代码后四位或完整数量" } },
       required: ["action", "intent_id"], additionalProperties: false,
     },
     annotations: { readOnlyHint: false, untrustedContentHint: false },
     async execute(input) {
       const values = requireObject(input);
       await ensureDashboardState();
-      const payload = { action: requireString(values.action, "操作"), intent_id: requireString(values.intent_id, "交易建议 ID") };
+      const payload = { action: requireString(values.action, "操作"), intent_id: requireString(values.intent_id, "交易建议 ID"), confirmation: values.confirmation == null ? "" : String(values.confirmation).trim() };
       if (!["approve", "reject", "execute"].includes(payload.action)) throw new Error("不支持的交易操作");
+      if (payload.action === "approve" && !payload.confirmation) throw new Error("批准时必须提供确认码");
       const result = await request("/api/action", { method: "POST", body: JSON.stringify(payload) });
       await refresh();
       return result;
@@ -352,9 +353,14 @@ $("#tradeForm").addEventListener("submit", async (event) => {
 $("#approvalList").addEventListener("click", async (event) => {
   const button = event.target.closest("button[data-action]");
   if (!button) return;
+  let confirmation = "";
+  if (button.dataset.action === "approve") {
+    confirmation = window.prompt(`请手动输入 ${button.dataset.symbol} 的代码后四位，或完整数量 ${button.dataset.quantity}`) ?? "";
+    if (!confirmation.trim()) return;
+  }
   button.disabled = true;
   try {
-    const result = await request("/api/action", { method: "POST", body: JSON.stringify({ action: button.dataset.action, intent_id: button.dataset.id }) });
+    const result = await request("/api/action", { method: "POST", body: JSON.stringify({ action: button.dataset.action, intent_id: button.dataset.id, confirmation }) });
     toast(result.status === "RISK_REJECTED" ? `执行被风控拒绝：${(result.rejection_reasons || []).join("；")}` : `状态：${statusText[result.status] || result.status}`, result.status === "RISK_REJECTED");
     await refresh();
   } catch (error) { toast(error.message, true); button.disabled = false; }

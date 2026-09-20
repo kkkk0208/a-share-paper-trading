@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from .ledger import PaperLedger
+from .snapshots import TradingCalendar
 
 
 def calculate_performance(
     ledger: PaperLedger, account_id: str, start: date, end: date,
+    calendar_path: str | Path | None = None,
 ) -> dict[str, Any]:
     if end < start:
         raise ValueError("--to must not be earlier than --from")
@@ -22,8 +25,24 @@ def calculate_performance(
             "WHERE o.side='SELL' AND date(f.created_at) BETWEEN ? AND ? ORDER BY f.created_at",
             (start.isoformat(), end.isoformat()),
         ).fetchall()
+    missing_dates: list[str] = []
+    calendar_available = bool(calendar_path and Path(calendar_path).exists())
+    if calendar_available:
+        missing_dates = [
+            item.isoformat() for item in TradingCalendar(calendar_path).missing_snapshot_dates(
+                ledger, account_id, start, end,
+            )
+        ]
     if len(curve) < 2:
-        raise ValueError("绩效计算至少需要两个交易日的 equity_curve 收盘快照")
+        return {
+            "status": "INSUFFICIENT_DATA",
+            "snapshot_count": len(curve),
+            "calendar_available": calendar_available,
+            "snapshot_gap_count": len(missing_dates),
+            "snapshot_gap_dates": missing_dates,
+            "metrics_incomplete": True,
+            "message": "绩效计算至少需要两个交易日的 equity_curve 收盘快照",
+        }
 
     equities = [Decimal(row["equity"]) for row in curve]
     cumulative = equities[-1] / equities[0] - Decimal("1")
@@ -48,6 +67,7 @@ def calculate_performance(
     benchmark_last = Decimal(curve[-1]["benchmark_close"])
     benchmark_return = benchmark_last / benchmark_first - Decimal("1")
     return {
+        "status": "OK" if not missing_dates else "INCOMPLETE",
         "from": curve[0]["trade_date"],
         "to": curve[-1]["trade_date"],
         "snapshot_count": len(curve),
@@ -59,4 +79,8 @@ def calculate_performance(
         "profit_loss_ratio": profit_loss_ratio,
         "benchmark_return": benchmark_return,
         "excess_return": cumulative - benchmark_return,
+        "calendar_available": calendar_available,
+        "snapshot_gap_count": len(missing_dates),
+        "snapshot_gap_dates": missing_dates,
+        "metrics_incomplete": bool(missing_dates),
     }

@@ -7,38 +7,11 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from .fees import FeeConfig, load_fee_config
 from .models import money
 
 
 ALLOWED_PAPER_ADAPTERS = {"deterministic", "vnpy_paper"}
-
-
-@dataclass(frozen=True)
-class FeeConfig:
-    commission_rate: Decimal
-    commission_min: Decimal
-    stamp_duty_rate: Decimal
-    stamp_duty_side: str
-    transfer_fee_rate: Decimal
-    transfer_fee_side: str
-
-    def __post_init__(self) -> None:
-        for name in ("commission_rate", "stamp_duty_rate", "transfer_fee_rate"):
-            object.__setattr__(self, name, Decimal(str(getattr(self, name))))
-        object.__setattr__(self, "commission_min", money(self.commission_min))
-        object.__setattr__(self, "stamp_duty_side", self.stamp_duty_side.upper())
-        object.__setattr__(self, "transfer_fee_side", self.transfer_fee_side.upper())
-        if min(self.commission_rate, self.stamp_duty_rate, self.transfer_fee_rate) < 0:
-            raise ValueError("fee rates cannot be negative")
-        if self.commission_min < 0:
-            raise ValueError("commission_min cannot be negative")
-        if self.stamp_duty_side not in {"BUY", "SELL", "BOTH", "NONE"}:
-            raise ValueError("invalid stamp_duty_side")
-        if self.transfer_fee_side not in {"BUY", "SELL", "BOTH", "NONE"}:
-            raise ValueError("invalid transfer_fee_side")
-
-    def to_dict(self) -> dict[str, str]:
-        return {key: str(value) for key, value in self.__dict__.items()}
 
 
 @dataclass(frozen=True)
@@ -143,15 +116,21 @@ def load_config(path: str | Path) -> PaperConfig:
     data.setdefault("intent_ttl_minutes", 30)
     data.setdefault("quote_failover_failures", 3)
     data.setdefault("benchmark_symbol", "000300.SH")
-    if "fees" not in data:
-        data["fees"] = {
+    shared_fees = load_fee_config()
+    if "fees" in data and FeeConfig(**data["fees"]) != shared_fees:
+        raise ValueError("paper config fee values differ from shared config/fees.json")
+    if "commission_bps" in data:
+        legacy_fees = FeeConfig(**{
             "commission_rate": str(Decimal(str(data.pop("commission_bps"))) / Decimal("10000")),
             "commission_min": data.pop("minimum_commission"),
             "stamp_duty_rate": str(Decimal(str(data.pop("sell_stamp_tax_bps"))) / Decimal("10000")),
             "stamp_duty_side": "SELL",
             "transfer_fee_rate": str(Decimal(str(data.pop("transfer_fee_bps"))) / Decimal("10000")),
             "transfer_fee_side": "BOTH",
-        }
+        })
+        if legacy_fees != shared_fees:
+            raise ValueError("legacy paper fee values differ from shared config/fees.json")
+    data["fees"] = shared_fees.to_dict()
     if "matching" not in data:
         data["matching"] = {
             "min_depth_ratio": "3.0",

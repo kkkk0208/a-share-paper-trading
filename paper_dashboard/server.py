@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -21,15 +22,20 @@ CONFIG_PATH = PROJECT_ROOT / "config" / "paper_trading.json"
 EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "paper_trading.example.json"
 RUNTIME_DIR = PROJECT_ROOT / "runtime" / "paper_trading"
 DB_PATH = RUNTIME_DIR / "paper_trading.sqlite3"
+CALENDAR_PATH = PROJECT_ROOT / "data" / "trading_calendar.csv"
+HISTORY_DIR = PROJECT_ROOT / "data" / "paper_closes"
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from paper_trading.config import PaperConfig, load_config  # noqa: E402
+from paper_trading.broker import StaticQuoteBroker  # noqa: E402
+from paper_trading.fees import load_fee_config  # noqa: E402
 from paper_trading.ledger import PaperLedger  # noqa: E402
 from paper_trading.market_data import TencentPaperQuoteBroker  # noqa: E402
 from paper_trading.models import OrderSide, SignalIntent  # noqa: E402
 from paper_trading.order_service import OrderService  # noqa: E402
 from paper_trading.reconciliation import reconcile  # noqa: E402
 from paper_trading.report_adapter import paper_account_summary  # noqa: E402
+from paper_trading.snapshots import SnapshotCatchup  # noqa: E402
 
 
 def now_local() -> datetime:
@@ -68,6 +74,9 @@ def dashboard_state(csrf_token: str) -> dict[str, Any]:
     config = load_config(CONFIG_PATH)
     ledger = PaperLedger(DB_PATH)
     ledger.initialize_account(config)
+    snapshot_catchup = SnapshotCatchup(
+        ledger, config.account_id, CALENDAR_PATH, HISTORY_DIR,
+    ).catch_up(ledger.latest_market_date(), now_local())
     account = paper_account_summary(ledger, config.account_id)
     raw_account = ledger.account(config.account_id)
     with ledger.connection() as con:
@@ -116,6 +125,7 @@ def dashboard_state(csrf_token: str) -> dict[str, Any]:
         "fills": [dict(row) for row in fill_rows],
         "latestQuote": None if latest_quote is None else dict(latest_quote),
         "reconciliation": reconcile(ledger, config.account_id),
+        "snapshotCatchup": snapshot_catchup,
     }
 
 
@@ -125,12 +135,15 @@ def setup_account(payload: dict[str, Any]) -> dict[str, Any]:
     expected = read_json(EXAMPLE_CONFIG_PATH)
     allowed = set(PaperConfig.__dataclass_fields__)
     candidate = {key: payload.get(key, expected.get(key)) for key in allowed}
+    candidate["fees"] = load_fee_config()
     candidate["paper_mode"] = True
     candidate["adapter"] = "deterministic"
     config = PaperConfig(**candidate)
     CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     temp = CONFIG_PATH.with_suffix(".json.tmp")
-    temp.write_text(json.dumps(config.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    serialized = config.to_dict()
+    serialized.pop("fees", None)
+    temp.write_text(json.dumps(serialized, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(CONFIG_PATH)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     ledger = PaperLedger(DB_PATH)
@@ -144,12 +157,22 @@ def service() -> tuple[PaperConfig, PaperLedger, OrderService]:
     config = load_config(CONFIG_PATH)
     ledger = PaperLedger(DB_PATH)
     ledger.initialize_account(config)
+    SnapshotCatchup(ledger, config.account_id, CALENDAR_PATH, HISTORY_DIR).catch_up(
+        ledger.latest_market_date(), now_local(),
+    )
     broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
-    return config, ledger, OrderService(config, ledger, broker, RUNTIME_DIR)
+    return config, ledger, OrderService(config, ledger, broker, RUNTIME_DIR, CALENDAR_PATH)
+
+
+def approval_confirmation_valid(intent: SignalIntent, confirmation: Any) -> bool:
+    value = str(confirmation or "").strip().upper()
+    code = intent.symbol.split(".", 1)[0]
+    return value in {code[-4:], str(intent.quantity)}
 
 
 class DashboardHandler(SimpleHTTPRequestHandler):
     csrf_token = ""
+    access_token = ""
     allowed_origins: set[str] = set()
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -173,6 +196,20 @@ class DashboardHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        query_token = parse_qs(parsed.query).get("token", [""])[0]
+        if parsed.path == "/" and query_token and secrets.compare_digest(query_token, self.access_token):
+            self.send_response(HTTPStatus.SEE_OTHER)
+            self.send_header("Location", "/")
+            self.send_header(
+                "Set-Cookie",
+                f"PaperDashboardToken={self.access_token}; Path=/; HttpOnly; SameSite=Strict",
+            )
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            return
+        if not self._has_access_token():
+            self.send_json({"error": "缺少或无效的看板访问令牌"}, HTTPStatus.FORBIDDEN)
+            return
         if parsed.path == "/api/state":
             try:
                 self.send_json(dashboard_state(self.csrf_token))
@@ -197,10 +234,16 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         token = self.headers.get("X-Paper-CSRF")
         content_type = self.headers.get("Content-Type", "")
         return (
-            token == self.csrf_token
-            and (not origin or origin in self.allowed_origins)
+            self._has_access_token()
+            and token == self.csrf_token
+            and origin in self.allowed_origins
             and content_type.startswith("application/json")
         )
+
+    def _has_access_token(self) -> bool:
+        cookie = SimpleCookie(self.headers.get("Cookie", ""))
+        supplied = cookie.get("PaperDashboardToken")
+        return bool(supplied and secrets.compare_digest(supplied.value, self.access_token))
 
     def _body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length", "0"))
@@ -243,10 +286,23 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 intent_id = str(payload.get("intent_id") or "")
                 when = now_local()
                 if action == "approve":
+                    intent = ledger.get_intent(intent_id)
+                    if not approval_confirmation_valid(intent, payload.get("confirmation")):
+                        raise ValueError("批准确认不匹配：请输入股票代码后四位或完整数量")
                     result = orders.approve(intent_id, "dashboard-user", str(payload.get("note") or "网页批准"), when)
                 elif action == "reject":
                     result = orders.reject(intent_id, "dashboard-user", str(payload.get("note") or "网页拒绝"), when)
                 elif action == "execute":
+                    intent = ledger.get_intent(intent_id)
+                    quote = orders.broker.latest_quote(intent.symbol)
+                    execution_catchup = SnapshotCatchup(
+                        ledger, config.account_id, CALENDAR_PATH, HISTORY_DIR,
+                    ).catch_up(quote.timestamp.date(), when, {quote.symbol: quote.last})
+                    if execution_catchup["unresolved"]:
+                        raise ValueError("存在无法补齐的历史净值缺口，拒绝执行成交")
+                    orders = OrderService(
+                        config, ledger, StaticQuoteBroker(quote), RUNTIME_DIR, CALENDAR_PATH,
+                    )
                     result = orders.execute(intent_id, when)
                 elif action == "kill":
                     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -283,12 +339,13 @@ def main() -> int:
         RUNTIME_DIR = Path(args.runtime_dir).resolve()
         DB_PATH = RUNTIME_DIR / "paper_trading.sqlite3"
     token = secrets.token_urlsafe(32)
-    DashboardHandler.csrf_token = token
+    DashboardHandler.csrf_token = secrets.token_urlsafe(32)
+    DashboardHandler.access_token = token
     DashboardHandler.allowed_origins = {
         f"http://127.0.0.1:{args.port}", f"http://localhost:{args.port}"
     }
     server = ThreadingHTTPServer((args.host, args.port), DashboardHandler)
-    print(f"PAPER_DASHBOARD=http://{args.host}:{args.port}", flush=True)
+    print(f"PAPER_DASHBOARD=http://{args.host}:{args.port}/?token={token}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

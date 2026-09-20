@@ -19,6 +19,7 @@ from .performance import calculate_performance
 from .reconciliation import reconcile
 from .report_adapter import paper_account_summary
 from .signal_adapter import load_intent
+from .snapshots import SnapshotCatchup
 
 
 def now_local() -> datetime:
@@ -115,11 +116,24 @@ def main(argv: list[str] | None = None) -> int:
     runtime = Path(args.runtime_dir)
     runtime.mkdir(parents=True, exist_ok=True)
     when = now_local()
+    project_root = Path(__file__).resolve().parent.parent
+    calendar_path = project_root / "data" / "trading_calendar.csv"
+    history_dir = project_root / "data" / "paper_closes"
 
     if args.command == "init":
         ledger.initialize_account(config, when)
         print_json({"status": "INITIALIZED", "account": paper_account_summary(ledger, config.account_id)})
         return 0
+    ledger.initialize_account(config, when)
+    snapshots = SnapshotCatchup(
+        ledger, config.account_id, calendar_path, history_dir,
+    )
+    catchup = snapshots.catch_up(ledger.latest_market_date(), when)
+    if catchup["unresolved"]:
+        print(
+            f"warning: {len(catchup['unresolved'])} 个净值快照缺口无法自动补齐；perf 会显式列出",
+            file=sys.stderr,
+        )
     if args.command == "draft":
         from datetime import timedelta
         token = uuid.uuid4().hex[:10]
@@ -175,19 +189,31 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "snapshot":
         broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
+        current_prices: dict[str, Decimal] = {}
         for position in ledger.positions(config.account_id):
-            ledger.save_quote(broker.latest_quote(position["symbol"]), when)
+            quote = broker.latest_quote(position["symbol"])
+            ledger.save_quote(quote, when)
+            current_prices[position["symbol"]] = quote.last
         benchmark = broker.latest_quote(config.benchmark_symbol)
+        ledger.save_quote(benchmark, when)
         if benchmark.timestamp.hour < 15:
             raise ValueError("净值快照只能使用收盘后的基准行情")
-        result = ledger.record_equity_snapshot(
-            config.account_id, benchmark.timestamp.date(), benchmark.last, when,
-        )
-        print_json({"status": "SNAPSHOT_RECORDED", **result, "benchmark": config.benchmark_symbol})
+        catchup = snapshots.catch_up(benchmark.timestamp.date(), when, current_prices)
+        if not catchup["calendar_available"]:
+            result = ledger.record_equity_snapshot(
+                config.account_id, benchmark.timestamp.date(), benchmark.last, when,
+            )
+        else:
+            result = {"trade_date": benchmark.timestamp.date()}
+        print_json({
+            "status": "SNAPSHOTS_CHECKED", **result, "benchmark": config.benchmark_symbol,
+            "filled": catchup["filled"], "unresolved": catchup["unresolved"],
+        })
         return 0
     if args.command == "perf":
         print_json(calculate_performance(
             ledger, config.account_id, date.fromisoformat(args.from_date), date.fromisoformat(args.to_date),
+            calendar_path,
         ))
         return 0
     if args.command == "corp-add":
@@ -204,7 +230,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "propose":
         intent = load_intent(args.intent)
         broker, quote = load_quote(args.quote, intent.symbol, config.quote_failover_failures)
-        service = OrderService(config, ledger, broker, runtime)
+        snapshots.catch_up(quote.timestamp.date(), when, {quote.symbol: quote.last})
+        service = OrderService(config, ledger, broker, runtime, calendar_path)
         print_json(service.propose(intent, quote, when))
         return 0
     if args.command in {"approve", "reject"}:
@@ -213,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
             timestamp=when,
             last="1", bid="1", ask="1", bid_size=0, ask_size=0,
             source="approval_only", tradable=False, limit_up="1", limit_down="1",
-        )), runtime)
+        )), runtime, calendar_path)
         if args.command == "approve":
             print_json(service.approve(args.intent_id, args.actor, args.note, when))
         else:
@@ -221,8 +248,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "execute":
         intent = ledger.get_intent(args.intent_id)
-        broker, _ = load_quote(getattr(args, "quote", None), intent.symbol, config.quote_failover_failures)
-        service = OrderService(config, ledger, broker, runtime)
+        broker, quote = load_quote(getattr(args, "quote", None), intent.symbol, config.quote_failover_failures)
+        execution_catchup = snapshots.catch_up(quote.timestamp.date(), when, {quote.symbol: quote.last})
+        if execution_catchup["unresolved"]:
+            raise ValueError("存在无法补齐的历史净值缺口，拒绝在错误继续传播前执行成交")
+        service = OrderService(config, ledger, broker, runtime, calendar_path)
         print_json(service.execute(args.intent_id, when))
         return 0
     return 1

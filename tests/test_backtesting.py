@@ -53,18 +53,18 @@ def make_config(days: int = 8) -> BacktestConfig:
 
 class BacktestTests(unittest.TestCase):
     def test_signal_executes_at_next_open_without_lookahead(self) -> None:
-        stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 20, 13, 6, 8])
+        stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 13, 13, 6, 8])
         result = run_backtest(make_config(6), {"000001.SZ": stock}, frame([100, 101, 102, 103, 104, 105]))
         buy = result.trades.iloc[0]
         self.assertEqual("BUY", buy["side"])
         self.assertEqual("2024-01-03", buy["signal_date"])
         self.assertEqual("2024-01-04", buy["execution_date"])
-        self.assertEqual(20.0, buy["raw_open"])
-        self.assertEqual(20.01, buy["fill_price"])
+        self.assertEqual(13.0, buy["raw_open"])
+        self.assertEqual(13.01, buy["fill_price"])
         self.assertEqual(0, buy["quantity"] % 100)
 
     def test_costs_and_realized_pnl_are_recorded(self) -> None:
-        stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 20, 13, 6, 8])
+        stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 13, 13, 6, 8])
         result = run_backtest(make_config(6), {"000001.SZ": stock}, frame([100] * 6))
         buy, sell = result.trades.iloc[0], result.trades.iloc[1]
         self.assertGreaterEqual(buy["commission"], 5.0)
@@ -81,6 +81,20 @@ class BacktestTests(unittest.TestCase):
         self.assertLess(pieces["validation"].index[-1], pieces["test"].index[0])
         metrics = segmented_metrics(result.equity_curve, result.trades, test_config.splits)
         self.assertEqual({"full", "train", "validation", "test"}, set(metrics))
+        self.assertIsNone(metrics["full"]["annualized_return"])
+        self.assertIsNone(metrics["full"]["sharpe_ratio_rf0"])
+
+    def test_limit_up_open_skips_buy_and_history_gap_warns(self) -> None:
+        stock = frame([10, 12, 13, 8, 7, 9], [10, 11, 13.2, 13, 6, 8])
+        stock = stock.drop(stock.index[3:5])
+        test_config = make_config(6)
+        object.__setattr__(
+            test_config, "execution",
+            ExecutionConfig(100, Decimal("5"), Decimal("0.5"), Decimal("0.01"), 2),
+        )
+        result = run_backtest(test_config, {"000001.SZ": stock}, frame([100] * 6))
+        self.assertTrue(result.trades.empty or result.trades.iloc[0]["execution_date"] != "2024-01-04")
+        self.assertTrue(any("history gap" in item for item in result.warnings))
 
     def test_cache_and_config_are_reproducible(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

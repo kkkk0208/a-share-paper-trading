@@ -189,6 +189,28 @@ class PaperTradingTests(unittest.TestCase):
                 ledger.apply_corporate_actions(cfg.account_id, datetime(2026, 6, 1).date(), now), []
             )
 
+    def test_corporate_action_refuses_retroactive_adjustment_after_fill(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config()
+            ledger = PaperLedger(root / "paper.sqlite3")
+            created = datetime(2026, 6, 1, 9, 59, 30, tzinfo=SHANGHAI)
+            first_quote = quote(datetime(2026, 6, 1, 10, 0, tzinfo=SHANGHAI))
+            ledger.initialize_account(cfg, created)
+            service = OrderService(cfg, ledger, StaticQuoteBroker(first_quote), root)
+            service.propose(intent("retroactive-ca", "BUY", created), first_quote, first_quote.timestamp)
+            service.approve("retroactive-ca", "tester", "checked", first_quote.timestamp)
+            service.broker.quote = quote(first_quote.timestamp + timedelta(seconds=2))
+            service.execute("retroactive-ca", first_quote.timestamp + timedelta(seconds=2))
+            ledger.add_corporate_action(
+                "002195.SZ", datetime(2026, 6, 1).date(), Decimal("0.10"),
+                Decimal("0"), Decimal("1"), first_quote.timestamp,
+            )
+            with self.assertRaisesRegex(ValueError, "拒绝事后调整"):
+                ledger.apply_corporate_actions(
+                    cfg.account_id, datetime(2026, 6, 1).date(), first_quote.timestamp,
+                )
+
     def test_configuration_refuses_live_mode_and_unknown_adapter(self):
         with self.assertRaisesRegex(ValueError, "paper_mode"):
             config(paper_mode=False)
@@ -301,6 +323,23 @@ class PaperTradingTests(unittest.TestCase):
             result = service.propose(intent("no-limits", "BUY", created), no_limits, now)
             self.assertEqual(result["decision"], "REJECTED")
             self.assertIn("缺少涨停价", " ".join(result["rejection_reasons"]))
+
+    def test_configured_trading_calendar_fails_closed_when_missing(self):
+        created = datetime(2026, 9, 21, 9, 59, 30, tzinfo=SHANGHAI)
+        tick = quote(datetime(2026, 9, 21, 10, 0, tzinfo=SHANGHAI))
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            cfg = config()
+            ledger = PaperLedger(root / "paper.sqlite3")
+            ledger.initialize_account(cfg, created)
+            service = OrderService(
+                cfg, ledger, StaticQuoteBroker(tick), root, root / "missing-calendar.csv",
+            )
+            result = service.propose(intent("calendar-missing", "BUY", created), tick, tick.timestamp)
+            self.assertIn(
+                "正式交易日历不可用或行情日期不是交易日",
+                result["rejection_reasons"],
+            )
 
     def test_changed_payload_cannot_reuse_intent_id(self):
         created = datetime(2026, 9, 21, 9, 59, 0, tzinfo=SHANGHAI)

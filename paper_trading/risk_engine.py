@@ -6,8 +6,10 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import PaperConfig
+from .fees import calculate_fees
 from .ledger import PaperLedger
 from .models import MarketQuote, OrderSide, RiskCheck, RiskDecision, SignalIntent, money
+from .snapshots import TradingCalendar
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -22,10 +24,14 @@ def in_continuous_session(timestamp: datetime) -> bool:
 
 
 class RiskEngine:
-    def __init__(self, config: PaperConfig, ledger: PaperLedger, runtime_dir: str | Path) -> None:
+    def __init__(
+        self, config: PaperConfig, ledger: PaperLedger, runtime_dir: str | Path,
+        calendar_path: str | Path | None = None,
+    ) -> None:
         self.config = config
         self.ledger = ledger
         self.runtime_dir = Path(runtime_dir)
+        self.calendar = TradingCalendar(calendar_path) if calendar_path else None
 
     def evaluate(self, intent: SignalIntent, quote: MarketQuote, now: datetime) -> RiskDecision:
         account = self.ledger.account(self.config.account_id)
@@ -49,6 +55,9 @@ class RiskEngine:
         check("quote_symbol", quote.symbol == intent.symbol, "行情证券与交易意图不一致")
         check("quote_fresh", -2 <= age <= self.config.matching.max_quote_age_seconds,
               f"行情时延 {age:.1f} 秒超过限制")
+        if self.calendar is not None:
+            check("trading_calendar", self.calendar.available and self.calendar.is_trading_day(quote.timestamp.date()),
+                  "正式交易日历不可用或行情日期不是交易日")
         check("trading_session", in_continuous_session(quote.timestamp), "不在连续竞价时段或不是工作日")
         check("tradable", quote.tradable, "证券当前不可交易")
         check("lot_size", intent.side == OrderSide.SELL or intent.quantity % self.config.lot_size == 0,
@@ -62,12 +71,8 @@ class RiskEngine:
               f"订单金额 {order_value} 超过单笔上限 {self.config.max_order_value}")
 
         if intent.side == OrderSide.BUY:
-            estimated_fee = max(
-                self.config.fees.commission_min,
-                money(order_value * self.config.fees.commission_rate),
-            )
-            if self.config.fees.transfer_fee_side in {"BUY", "BOTH"}:
-                estimated_fee += money(order_value * self.config.fees.transfer_fee_rate)
+            commission, stamp_tax, transfer_fee = calculate_fees(self.config.fees, "BUY", order_value)
+            estimated_fee = money(commission + stamp_tax + transfer_fee)
             check("cash", account["cash"] - order_value - estimated_fee >= self.config.min_cash_buffer,
                   "买入后现金低于安全垫")
             check("max_symbol_value", current_symbol_value + order_value <= self.config.max_symbol_value,

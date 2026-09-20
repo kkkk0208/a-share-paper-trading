@@ -7,7 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from paper_trading.config import FeeConfig
+from paper_trading.fees import FeeConfig, load_fee_config
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class ExecutionConfig:
     slippage_bps: Decimal
     max_position_weight: Decimal
     max_volume_participation: Decimal
+    suspension_warning_days: int = 5
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slippage_bps", Decimal(str(self.slippage_bps)))
@@ -40,6 +41,8 @@ class ExecutionConfig:
             raise ValueError("max_position_weight must be in (0, 1]")
         if not Decimal("0") < self.max_volume_participation <= Decimal("1"):
             raise ValueError("max_volume_participation must be in (0, 1]")
+        if self.suspension_warning_days < 1:
+            raise ValueError("suspension_warning_days must be positive")
 
 
 @dataclass(frozen=True)
@@ -105,4 +108,8 @@ class BacktestConfig:
 
 def load_backtest_config(path: str | Path) -> BacktestConfig:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    shared_fees = load_fee_config()
+    if "fees" in data and FeeConfig(**data["fees"]) != shared_fees:
+        raise ValueError("backtest fee values differ from shared config/fees.json")
+    data["fees"] = shared_fees.to_dict()
     return BacktestConfig(**data)

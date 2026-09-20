@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -49,20 +51,43 @@ class CachedHistoryStore:
         normalized.to_csv(path, index=False, encoding="utf-8")
         return path
 
+    def record_download(self, symbol: str, path: Path) -> None:
+        metadata_path = self.root / "download_manifest.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+        metadata[symbol] = {
+            "downloaded_at_utc": datetime.now(timezone.utc).isoformat(),
+            "file": path.name,
+        }
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def download_metadata(self) -> dict[str, object]:
+        path = self.root / "download_manifest.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
 
 class AkShareHistoryDownloader:
-    def __init__(self, store: CachedHistoryStore) -> None:
+    def __init__(self, store: CachedHistoryStore, calendar_path: str | Path | None = None) -> None:
         self.store = store
+        self.calendar_path = Path(calendar_path) if calendar_path else None
 
     def download_stock(self, symbol: str, start: str, end: str, adjustment: str) -> Path:
         import akshare as ak
 
         adjust = "" if adjustment == "none" else adjustment
-        frame = ak.stock_zh_a_hist(
-            symbol=symbol.split(".", 1)[0], period="daily",
-            start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust,
-        )
-        return self.store.save(symbol, frame)
+        code, exchange = symbol.split(".", 1)
+        try:
+            frame = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust,
+            )
+        except Exception:
+            frame = ak.stock_zh_a_daily(
+                symbol=f"{exchange.lower()}{code}",
+                start_date=start.replace("-", ""), end_date=end.replace("-", ""), adjust=adjust,
+            )
+        path = self.store.save(symbol, frame)
+        self.store.record_download(symbol, path)
+        return path
 
     def download_benchmark(self, symbol: str, start: str, end: str) -> Path:
         import akshare as ak
@@ -81,4 +106,11 @@ class AkShareHistoryDownloader:
             frame["volume"] = 0
         normalized = normalize_history(frame)
         normalized = normalized.loc[pd.Timestamp(start):pd.Timestamp(end)]
-        return self.store.save(symbol, normalized.reset_index())
+        path = self.store.save(symbol, normalized.reset_index())
+        self.store.record_download(symbol, path)
+        if self.calendar_path:
+            self.calendar_path.parent.mkdir(parents=True, exist_ok=True)
+            normalized.reset_index().loc[:, ["date", "close"]].to_csv(
+                self.calendar_path, index=False, encoding="utf-8",
+            )
+        return path

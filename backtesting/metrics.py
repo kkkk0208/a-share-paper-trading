@@ -21,10 +21,11 @@ def calculate_metrics(curve: pd.DataFrame, trades: pd.DataFrame) -> dict[str, An
     cumulative = equity.iloc[-1] / equity.iloc[0] - 1
     benchmark_return = benchmark.iloc[-1] / benchmark.iloc[0] - 1
     years = max((len(equity) - 1) / 252, 0)
-    annualized = (equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1 if years > 0 and equity.iloc[0] > 0 else None
+    sufficient_sample = len(equity) >= 60
+    annualized = (equity.iloc[-1] / equity.iloc[0]) ** (1 / years) - 1 if sufficient_sample and years > 0 and equity.iloc[0] > 0 else None
     drawdown = equity / equity.cummax() - 1
-    volatility = daily.std(ddof=1) * math.sqrt(252) if len(daily) >= 2 else None
-    sharpe = daily.mean() / daily.std(ddof=1) * math.sqrt(252) if len(daily) >= 2 and daily.std(ddof=1) > 0 else None
+    volatility = daily.std(ddof=1) * math.sqrt(252) if sufficient_sample and len(daily) >= 2 else None
+    sharpe = daily.mean() / daily.std(ddof=1) * math.sqrt(252) if sufficient_sample and len(daily) >= 2 and daily.std(ddof=1) > 0 else None
     sells = trades[trades["side"] == "SELL"] if not trades.empty else trades
     wins = sells[sells["realized_pnl"] > 0] if not sells.empty else sells
     gross_profit = float(wins["realized_pnl"].sum()) if not wins.empty else 0.0
@@ -35,6 +36,7 @@ def calculate_metrics(curve: pd.DataFrame, trades: pd.DataFrame) -> dict[str, An
         "start": curve.index[0].date().isoformat(),
         "end": curve.index[-1].date().isoformat(),
         "trading_days": int(len(curve)),
+        "sample_sufficient_for_annualized_metrics": sufficient_sample,
         "cumulative_return": _finite(cumulative),
         "annualized_return": _finite(annualized) if annualized is not None else None,
         "max_drawdown": _finite(float(drawdown.min())),

@@ -1,5 +1,7 @@
 runtime/paper_trading/
 runtime/backtesting/
+data/trading_calendar.csv
+data/paper_closes/
 config/paper_trading.json
 __pycache__/
 *.pyc

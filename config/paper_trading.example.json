@@ -20,14 +20,6 @@
   "lot_size": 100,
   "max_participation_rate": "0.10",
   "slippage_bps": "5",
-  "fees": {
-    "commission_rate": "0.00025",
-    "commission_min": "5.00",
-    "stamp_duty_rate": "0.0005",
-    "stamp_duty_side": "SELL",
-    "transfer_fee_rate": "0.00001",
-    "transfer_fee_side": "BOTH"
-  },
   "matching": {
     "min_depth_ratio": "3.0",
     "min_ticks_delay": 1,

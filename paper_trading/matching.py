@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal, ROUND_DOWN
 
 from .config import PaperConfig
+from .fees import calculate_fees
 from .models import FillResult, MarketQuote, OrderSide, SignalIntent, money
 
 
@@ -52,15 +53,7 @@ class PaperMatcher:
             return None
 
         notional = money(fill_price * quantity)
-        commission = max(self.config.fees.commission_min, money(notional * self.config.fees.commission_rate))
-        stamp_tax = (
-            money(notional * self.config.fees.stamp_duty_rate)
-            if self.config.fees.stamp_duty_side in {intent.side.value, "BOTH"} else money(0)
-        )
-        transfer_fee = (
-            money(notional * self.config.fees.transfer_fee_rate)
-            if self.config.fees.transfer_fee_side in {intent.side.value, "BOTH"} else money(0)
-        )
+        commission, stamp_tax, transfer_fee = calculate_fees(self.config.fees, intent.side.value, notional)
         return FillResult(
             quantity=quantity,
             price=fill_price,

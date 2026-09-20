@@ -23,12 +23,18 @@ def _sha256(path: Path) -> str:
 def download(args: argparse.Namespace) -> int:
     config = load_backtest_config(args.config)
     store = CachedHistoryStore(args.cache_dir)
-    downloader = AkShareHistoryDownloader(store)
+    downloader = AkShareHistoryDownloader(store, Path("data") / "trading_calendar.csv")
+    paper_close_store = CachedHistoryStore(Path("data") / "paper_closes")
+    paper_close_downloader = AkShareHistoryDownloader(paper_close_store)
+    path = downloader.download_benchmark(config.benchmark_symbol, config.start_date.isoformat(), config.end_date.isoformat())
+    print(f"downloaded {config.benchmark_symbol}: {path}")
     for symbol in config.symbols:
         path = downloader.download_stock(symbol, config.start_date.isoformat(), config.end_date.isoformat(), config.price_adjustment)
         print(f"downloaded {symbol}: {path}")
-    path = downloader.download_benchmark(config.benchmark_symbol, config.start_date.isoformat(), config.end_date.isoformat())
-    print(f"downloaded {config.benchmark_symbol}: {path}")
+        paper_path = paper_close_downloader.download_stock(
+            symbol, config.start_date.isoformat(), config.end_date.isoformat(), "none",
+        )
+        print(f"downloaded unadjusted paper closes {symbol}: {paper_path}")
     return 0
 
 
@@ -39,6 +45,7 @@ def run(args: argparse.Namespace) -> int:
     benchmark = store.load(config.benchmark_symbol)
     result = run_backtest(config, histories, benchmark)
     summary = segmented_metrics(result.equity_curve, result.trades, config.splits)
+    summary["warnings"] = list(result.warnings)
 
     output = Path(args.output_dir)
     output.mkdir(parents=True, exist_ok=True)
@@ -53,6 +60,7 @@ def run(args: argparse.Namespace) -> int:
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
         "config": config.to_dict(),
         "source_sha256": source_hashes,
+        "source_downloads": store.download_metadata(),
         "signal_timing": "daily close",
         "execution_timing": "next available trading-day open",
         "research_status": "example strategy; not evidence of future performance",
