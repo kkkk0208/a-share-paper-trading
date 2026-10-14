@@ -9,8 +9,9 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from paper_trading.collector import CollectorSettings, QuoteCollector, build_report, capture_samples
+from paper_trading.collector import CollectorSettings, QuoteCollector, build_report, capture_samples, main
 from paper_trading.exchange_calendar import ExchangeCalendar
 from paper_trading.quote_sources import SinaSource, TencentSource
 from paper_trading.quote_store import QuoteStore
@@ -78,6 +79,24 @@ def events(store: QuoteStore, event_type: str | None = None) -> list[dict]:
 
 
 class CollectorTests(unittest.TestCase):
+    def test_scheduled_capture_rejects_a_missed_phase_or_date_without_fetching(self):
+        base = ["capture", "--symbols", STOCK, "--label", "opening_call",
+                "--expected-date", DAY.isoformat(), "--expected-phase", "opening_call"]
+        for now in (at(15, 2), at(9, 20, day=DAY + timedelta(days=1))):
+            with self.subTest(now=now), patch("paper_trading.collector.local_now", return_value=now), \
+                    patch("paper_trading.collector.capture_samples") as capture:
+                self.assertEqual(main(base), 2)
+                capture.assert_not_called()
+
+    def test_scheduled_capture_records_correct_phase_and_propagates_source_errors(self):
+        args = ["capture", "--symbols", STOCK, "--label", "opening_call",
+                "--expected-date", DAY.isoformat(), "--expected-phase", "opening_call"]
+        for error, expected_exit in ((None, 0), ("network down", 2)):
+            with self.subTest(error=error), patch("paper_trading.collector.local_now", return_value=at(9, 20)), \
+                    patch("paper_trading.collector.capture_samples", return_value=[{"error": error}]) as capture:
+                self.assertEqual(main(args), expected_exit)
+                self.assertEqual(capture.call_args.kwargs["now"], at(9, 20))
+
     def test_cycle_stores_ticks_once_and_marks_phase(self):
         with TemporaryDirectory() as temp:
             root, market, clock = Path(temp), FakeMarket(), Clock(at(10, 0, 4))

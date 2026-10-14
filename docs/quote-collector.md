@@ -29,6 +29,8 @@
 - `report --date 2026-10-15 --out runtime\paper_trading\reports\2026-10-15.json`：当天数据质量报告，`--out` 可选。全部通过时退出码为 0，否则为 2。
 - `capture --symbols 002195.SZ 000300.SH --label continuous`：保存两个源的原始返回到 `tests/fixtures/quotes/real/`，供解析测试使用。
 
+定时采样可加 `--expected-date 2026-10-15 --expected-phase opening_call`。实际日期或交易阶段不符合时，采样直接返回退出码 2，不请求接口、不写入错标样本。任一源抓取失败也返回 2，原始错误仍保存在样本元数据中，便于任务调度器识别失败。
+
 ## 和交易的关系
 
 - CLI 和看板默认先读采集进程存下的最新快照（6 秒以内），没有才去网上实时抓。采集进程开着时，交易和录制用的是同一份数据。

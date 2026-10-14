@@ -618,6 +618,9 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--symbols", nargs="+", required=True)
     capture.add_argument("--label", default="", help="例如 limit_up、suspended、opening_call")
     capture.add_argument("--out", default=str(DEFAULT_CAPTURE_DIR))
+    capture.add_argument("--expected-date", type=date.fromisoformat, help="计划抓样本的日期；错过日期则拒绝采集")
+    capture.add_argument("--expected-phase", choices=[phase.value for phase in Phase],
+                         help="计划抓样本的交易阶段；错过阶段则拒绝采集")
 
     commands.add_parser("sync-calendar", help="通过 AKShare 下载交易日历（含当年剩余交易日）")
     return parser
@@ -633,8 +636,17 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         return 0
     if args.command == "capture":
-        _print(capture_samples(args.symbols, args.out, args.label))
-        return 0
+        now = local_now().astimezone(SHANGHAI)
+        phase = session_phase(now)
+        if args.expected_date is not None and now.date() != args.expected_date:
+            print(f"拒绝采样：计划日期 {args.expected_date}，实际日期 {now.date()}", file=sys.stderr)
+            return 2
+        if args.expected_phase is not None and phase.value != args.expected_phase:
+            print(f"拒绝采样：计划阶段 {args.expected_phase}，实际阶段 {phase.value}", file=sys.stderr)
+            return 2
+        result = capture_samples(args.symbols, args.out, args.label, now=now)
+        _print(result)
+        return 2 if any(item["error"] for item in result) else 0
     if args.command == "report":
         day = date.fromisoformat(args.date) if args.date else local_now().astimezone(SHANGHAI).date()
         result = build_report(
