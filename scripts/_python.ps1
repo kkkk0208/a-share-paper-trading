@@ -1,6 +1,16 @@
 # Shared helper: decides which python.exe the scripts use.
 # Order: $env:A_SHARE_PYTHON, then .venv inside the project, then python on PATH.
 # Set it once (new terminals pick it up):  setx A_SHARE_PYTHON "C:\path\to\python.exe"
+
+# Preserve existing bypass hosts and environment proxy URLs.  On Windows,
+# urllib uses this nonempty environment map instead of registry proxy settings.
+# With no HTTP(S)_PROXY variables, all requests in these Python processes are direct.
+$QuoteBypassHosts = @($env:NO_PROXY -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+foreach ($QuoteHost in @('qt.gtimg.cn', 'hq.sinajs.cn')) {
+    if ($QuoteBypassHosts -notcontains $QuoteHost) { $QuoteBypassHosts += $QuoteHost }
+}
+$env:NO_PROXY = $QuoteBypassHosts -join ','
+
 function Resolve-ProjectPython {
     param([Parameter(Mandatory = $true)][string]$Root)
     if ($env:A_SHARE_PYTHON) {

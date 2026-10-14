@@ -1,7 +1,7 @@
 # Task Scheduler entry point. Use -File so Windows does not re-parse command text.
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Capture', 'Report')]
+    [ValidateSet('Capture', 'Report', 'Collect')]
     [string]$Mode,
     [Parameter(Mandatory = $true)]
     [string]$PythonPath,
@@ -12,18 +12,20 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot '_python.ps1')
 $LogDir = Join-Path $Root 'runtime\paper_trading'
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-$LogName = if ($Mode -eq 'Capture') { "acceptance-$ExpectedPhase.log" } else { 'acceptance-report.log' }
+$LogName = if ($Mode -eq 'Capture') { "acceptance-$ExpectedPhase.log" } elseif ($Mode -eq 'Collect') { 'collector-task.log' } else { 'acceptance-report.log' }
 $Log = Join-Path $LogDir $LogName
 "$(Get-Date -Format o) Starting $Mode $ExpectedPhase" | Out-File -FilePath $Log -Append -Encoding utf8
 if (-not (Test-Path -LiteralPath $PythonPath)) { throw "Python executable is missing: $PythonPath" }
 
 if ($Mode -eq 'Capture') {
     if (-not $ExpectedDate -or -not $ExpectedPhase) { throw 'Capture requires ExpectedDate and ExpectedPhase.' }
-    $env:NO_PROXY = 'qt.gtimg.cn,hq.sinajs.cn'
     $Arguments = @('-m', 'paper_trading.collector', 'capture', '--symbols', '002195.SZ', '002815.SZ', '000300.SH',
         '--label', $ExpectedPhase, '--expected-date', $ExpectedDate, '--expected-phase', $ExpectedPhase)
+} elseif ($Mode -eq 'Collect') {
+    $Arguments = @('-m', 'paper_trading.collector', 'run')
 } else {
     $Day = Get-Date -Format 'yyyy-MM-dd'
     $Out = Join-Path (Join-Path $LogDir 'reports') "$Day.json"
