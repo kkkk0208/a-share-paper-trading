@@ -109,6 +109,28 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(quote.tradable)
         self.assertEqual(quote.ask, Decimal("0.00"))
 
+    def test_tencent_suspension_marker_blocks_even_a_visible_book(self):
+        fields = tencent_body("002195", at(10, 0, 3)).split("~")
+        fields[40] = "S"
+        quote = parse_tencent('v_sz002195="' + "~".join(fields) + '";', [STOCK], self.fetched).quotes[STOCK]
+        self.assertTrue(quote.bid_levels and quote.ask_levels)
+        self.assertEqual(quote.status, "suspended")
+        self.assertFalse(quote.to_market_quote().tradable)
+
+    def test_tencent_real_suspended_and_normal_status_fields(self):
+        fixtures = Path(__file__).parent / "fixtures" / "quotes" / "real"
+        raw = (fixtures / "20261014_163315_suspended_tencent.txt").read_text(encoding="utf-8")
+        self.assertEqual(raw.split('"')[1].split("~")[40], "S")
+        halted = parse_tencent(raw, ["002717.SZ"], self.fetched).quotes["002717.SZ"]
+        self.assertEqual(halted.status, "suspended")
+        self.assertEqual(halted.last, Decimal("0.45"))
+        self.assertEqual(halted.timestamp.date(), date(2026, 10, 14))
+        self.assertFalse(halted.to_market_quote().tradable)
+        normal_raw = (fixtures / "20261014_163314_after_close_tencent.txt").read_text(encoding="utf-8")
+        self.assertEqual(normal_raw.split('"')[1].split("~")[40], "")
+        normal = parse_tencent(normal_raw, [STOCK], self.fetched).quotes[STOCK]
+        self.assertNotEqual(normal.status, "suspended")
+
     def test_tencent_errors_are_per_symbol(self):
         good = f'v_sz002195="{tencent_body("002195", at(10, 0, 3))}";'
         short = 'v_sz002815="51~测试~002815~10.00";'

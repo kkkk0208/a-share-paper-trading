@@ -97,8 +97,7 @@ class RealQuoteSampleTests(unittest.TestCase):
                 quote = next(iter(batch.quotes.values()))
                 self.assertFalse(quote.tradable)
                 self.assertFalse(quote.bid_levels or quote.ask_levels)
-                if sample["source"] == "sina":
-                    self.assertEqual(quote.status, "suspended")
+                self.assertEqual(quote.status, "suspended")
 
 
 if __name__ == "__main__":

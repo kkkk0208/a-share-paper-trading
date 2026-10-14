@@ -34,6 +34,7 @@ HTTP_TIMEOUT_SECONDS = 5.0
 TENCENT_CODE, TENCENT_LAST, TENCENT_PREV_CLOSE, TENCENT_OPEN, TENCENT_VOLUME_LOTS = 2, 3, 4, 5, 6
 TENCENT_BID_START, TENCENT_ASK_START = 9, 19      # price, lots, price, lots, ... five levels
 TENCENT_TIMESTAMP, TENCENT_HIGH, TENCENT_LOW, TENCENT_AMOUNT_WAN = 30, 33, 34, 37
+TENCENT_STATUS = 40
 TENCENT_LIMIT_UP, TENCENT_LIMIT_DOWN = 47, 48
 
 # Sina "," fields (0-based)
@@ -210,7 +211,7 @@ def _parse_tencent_fields(symbol: str, fields: list[str], raw: str) -> ParsedQuo
              for i in range(5)), 100),
         limit_up=None if index else _positive(_field(fields, TENCENT_LIMIT_UP)),
         limit_down=None if index else _positive(_field(fields, TENCENT_LIMIT_DOWN)),
-        status="unknown",
+        status="suspended" if (_field(fields, TENCENT_STATUS) or "").strip() == "S" else "unknown",
         raw=raw,
     )
 
