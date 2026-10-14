@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import call, patch
 from zoneinfo import ZoneInfo
 
 from paper_trading.broker import PaperBroker, StaticQuoteBroker
@@ -134,10 +135,24 @@ class ParserTests(unittest.TestCase):
         empty = parse_sina('var hq_str_sz002195="";', [STOCK], self.fetched)
         self.assertIn("empty payload", empty.errors[STOCK])
 
+    def test_sina_halt_with_zero_last_uses_previous_close_as_reference(self):
+        raw = sina_body(at(15, 36), last="0.000", bids=(), asks=(), status="03", prev="0.450")
+        quote = parse_sina(f'var hq_str_sz002195="{raw}";', [STOCK], self.fetched).quotes[STOCK]
+        self.assertEqual(quote.last, Decimal("0.450"))
+        self.assertEqual(quote.status, "suspended")
+        self.assertFalse(quote.tradable)
+
     def test_unreadable_payload_is_a_source_error(self):
         source = TencentSource(fetch_text=lambda url: "<html>blocked</html>")
         with self.assertRaises(QuoteSourceError):
             source.fetch([STOCK])
+
+    def test_tencent_retries_over_http_when_https_transport_fails(self):
+        raw = f'v_sz002195="{tencent_body("002195", at(10, 0, 3))}";'
+        with patch("paper_trading.quote_sources.http_get_gbk", side_effect=[OSError("TLS EOF"), raw]) as fetch:
+            self.assertEqual(TencentSource().fetch_text([STOCK]), raw)
+        https_url = "https://qt.gtimg.cn/q=sz002195"
+        self.assertEqual(fetch.call_args_list, [call(https_url), call(https_url.replace("https://", "http://", 1))])
 
 
 class ModelAndRuleTests(unittest.TestCase):

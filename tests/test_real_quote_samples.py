@@ -85,6 +85,21 @@ class RealQuoteSampleTests(unittest.TestCase):
                 with self.subTest(stem=group["tencent"]["file"], symbol=symbol):
                     self.assertLess(abs(a.last - b.last) / a.last, 0.01)
 
+    def test_named_edge_case_captures_keep_the_expected_market_shape(self):
+        for sample in self.samples:
+            batch = PARSERS[sample["source"]](sample["text"], sample["symbols"], sample["captured"])
+            if sample.get("label") == "limit_up" and sample["source"] == "tencent":
+                quote = next(iter(batch.quotes.values()))
+                self.assertTrue(quote.bid_levels)
+                self.assertFalse(quote.ask_levels)
+                self.assertEqual(quote.last, quote.limit_up)
+            if sample.get("label") == "suspended":
+                quote = next(iter(batch.quotes.values()))
+                self.assertFalse(quote.tradable)
+                self.assertFalse(quote.bid_levels or quote.ask_levels)
+                if sample["source"] == "sina":
+                    self.assertEqual(quote.status, "suspended")
+
 
 if __name__ == "__main__":
     unittest.main()

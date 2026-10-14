@@ -1,0 +1,12 @@
+{
+  "source": "sina",
+  "url": "https://hq.sinajs.cn/list=sh600202",
+  "symbols": [
+    "600202.SH"
+  ],
+  "captured_at": "2026-10-14T16:33:15.358051+08:00",
+  "phase": "after_close",
+  "label": "limit_up",
+  "file": "20261014_163315_limit_up_sina.txt",
+  "error": null
+}

@@ -1,0 +1,14 @@
+{
+  "source": "sina",
+  "url": "https://hq.sinajs.cn/list=sz002195,sz002815,sh000300",
+  "symbols": [
+    "002195.SZ",
+    "002815.SZ",
+    "000300.SH"
+  ],
+  "captured_at": "2026-10-14T16:33:14.977994+08:00",
+  "phase": "after_close",
+  "label": "after_close",
+  "file": "20261014_163314_after_close_sina.txt",
+  "error": null
+}

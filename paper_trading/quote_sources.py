@@ -239,7 +239,13 @@ def parse_sina(text: str, symbols: Sequence[str], fetched_at: datetime) -> Sourc
 def _parse_sina_fields(symbol: str, fields: list[str], raw: str) -> ParsedQuote:
     if len(fields) <= SINA_TIME:
         raise ValueError(f"sina payload has only {len(fields)} fields")
+    status_code = (_field(fields, SINA_STATUS) or "").strip()
+    status = "unknown" if not status_code else ("normal" if status_code == SINA_STATUS_NORMAL else "suspended")
     last = _positive(fields[SINA_LAST])
+    if last is None and status == "suspended":
+        # Suspended Sina rows use zero for the live price but retain the last
+        # reference price in prev_close.  Keep the row auditable/non-tradable.
+        last = _positive(fields[SINA_PREV_CLOSE])
     if last is None:
         raise ValueError("sina last price is missing or zero (not traded yet?)")
     try:
@@ -249,8 +255,6 @@ def _parse_sina_fields(symbol: str, fields: list[str], raw: str) -> ParsedQuote:
     except ValueError as exc:
         raise ValueError(f"sina timestamp is malformed: {fields[SINA_DATE]!r} {fields[SINA_TIME]!r}") from exc
     index = is_index(symbol)
-    status_code = (_field(fields, SINA_STATUS) or "").strip()
-    status = "unknown" if not status_code else ("normal" if status_code == SINA_STATUS_NORMAL else "suspended")
     volume = _decimal(fields[SINA_VOLUME_SHARES])
     return ParsedQuote(
         symbol=symbol, source="sina", timestamp=timestamp, last=last,
@@ -314,6 +318,24 @@ class TencentSource(BatchQuoteSource):
 
     def request_url(self, symbols: Sequence[str]) -> str:
         return TENCENT_URL.format(codes=",".join(to_vendor_code(symbol) for symbol in symbols))
+
+    def download(self, url: str) -> str:
+        """Prefer TLS, but tolerate Tencent's endpoint closing TLS connections.
+
+        Some networks can reach qt.gtimg.cn only over plain HTTP.  The payload is
+        still treated as untrusted market data and must pass the normal parser,
+        freshness and cross-source quality checks before it can drive an order.
+        """
+        try:
+            return http_get_gbk(url)
+        except Exception as https_error:
+            http_url = url.replace("https://", "http://", 1)
+            try:
+                return http_get_gbk(http_url)
+            except Exception as http_error:
+                raise QuoteSourceError(
+                    f"HTTPS failed ({https_error}); HTTP fallback failed ({http_error})"
+                ) from http_error
 
     def parse(self, text: str, symbols: Sequence[str], fetched_at: datetime) -> SourceBatch:
         return parse_tencent(text, symbols, fetched_at)
