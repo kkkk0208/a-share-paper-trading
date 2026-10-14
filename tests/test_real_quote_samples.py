@@ -75,15 +75,29 @@ class RealQuoteSampleTests(unittest.TestCase):
         pairs = [group for group in by_stem.values() if {"tencent", "sina"} <= set(group)]
         if not pairs:
             self.skipTest("no Tencent/Sina pairs captured at the same time")
+        compared = 0
+        timestamp_skips = 0
+        shared_quotes = 0
         for group in pairs:
             tencent = parse_tencent(group["tencent"]["text"], group["tencent"]["symbols"], group["tencent"]["captured"])
             sina = parse_sina(group["sina"]["text"], group["sina"]["symbols"], group["sina"]["captured"])
             for symbol in set(tencent.quotes) & set(sina.quotes):
                 a, b = tencent.quotes[symbol], sina.quotes[symbol]
+                shared_quotes += 1
                 if abs((a.timestamp - b.timestamp).total_seconds()) > 10:
+                    timestamp_skips += 1
                     continue
+                compared += 1
                 with self.subTest(stem=group["tencent"]["file"], symbol=symbol):
                     self.assertLess(abs(a.last - b.last) / a.last, 0.01)
+        if compared == 0:
+            if shared_quotes:
+                self.skipTest(
+                    f"no comparable Tencent/Sina quotes: timestamps differ by more than 10 seconds "
+                    f"for all {timestamp_skips} shared quotes across {len(pairs)} capture pairs; "
+                    "capture intraday samples to run the price comparison"
+                )
+            self.skipTest("no comparable Tencent/Sina quotes: no shared successfully parsed symbols")
 
     def test_named_edge_case_captures_keep_the_expected_market_shape(self):
         for sample in self.samples:
