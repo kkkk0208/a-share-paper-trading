@@ -110,18 +110,42 @@ class MarketQuote:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, money(value))
-        if min(self.last, self.bid, self.ask) <= 0:
-            raise ValueError("last, bid and ask must be positive")
+        if self.last <= 0:
+            raise ValueError("last must be positive")
+        if self.bid < 0 or self.ask < 0:
+            raise ValueError("bid and ask cannot be negative; use 0 for an empty book side")
+        object.__setattr__(self, "bid_size", int(self.bid_size))
+        object.__setattr__(self, "ask_size", int(self.ask_size))
         if self.bid_size < 0 or self.ask_size < 0:
             raise ValueError("quote sizes cannot be negative")
+        # A zero price means that side of the book is empty, for example no sellers
+        # at limit-up or no buyers at limit-down. That is real market state, not an error.
+        if self.bid == 0:
+            object.__setattr__(self, "bid_size", 0)
+        if self.ask == 0:
+            object.__setattr__(self, "ask_size", 0)
         for name, first_price, first_size in (
             ("bid_levels", self.bid, self.bid_size), ("ask_levels", self.ask, self.ask_size),
         ):
             raw_levels = getattr(self, name) or ((first_price, first_size),)
-            levels = tuple((money(price), int(size)) for price, size in raw_levels)
-            if any(price <= 0 or size < 0 for price, size in levels):
-                raise ValueError("order book levels must have positive prices and non-negative sizes")
-            object.__setattr__(self, name, levels[:5])
+            levels: list[tuple[Decimal, int]] = []
+            for raw_price, raw_size in raw_levels:
+                price, size = money(raw_price), int(raw_size)
+                if price < 0 or size < 0:
+                    raise ValueError("order book levels cannot be negative")
+                if price > 0 and size > 0:
+                    levels.append((price, size))
+            object.__setattr__(self, name, tuple(levels[:5]))
+
+    @property
+    def has_bid(self) -> bool:
+        """True when at least one buyer is visible, so a sell can be matched."""
+        return self.bid > 0 and self.bid_size > 0
+
+    @property
+    def has_ask(self) -> bool:
+        """True when at least one seller is visible, so a buy can be matched."""
+        return self.ask > 0 and self.ask_size > 0
 
     def to_dict(self) -> dict[str, Any]:
         result = asdict(self)

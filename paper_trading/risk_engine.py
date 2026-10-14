@@ -1,26 +1,24 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .config import PaperConfig
+from .exchange_calendar import ExchangeCalendar
 from .fees import calculate_fees
 from .ledger import PaperLedger
 from .models import MarketQuote, OrderSide, RiskCheck, RiskDecision, SignalIntent, money
-from .snapshots import TradingCalendar
+from .quote_quality import Phase, session_phase
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def in_continuous_session(timestamp: datetime) -> bool:
-    local = timestamp.astimezone(SHANGHAI)
-    if local.weekday() >= 5:
-        return False
-    current = local.time().replace(tzinfo=None)
-    return time(9, 30) <= current <= time(11, 30) or time(13, 0) <= current <= time(15, 0)
+    """09:30-11:30 and 13:00-14:57. 14:57-15:00 is the closing call auction."""
+    return session_phase(timestamp) == Phase.CONTINUOUS
 
 
 class RiskEngine:
@@ -31,7 +29,7 @@ class RiskEngine:
         self.config = config
         self.ledger = ledger
         self.runtime_dir = Path(runtime_dir)
-        self.calendar = TradingCalendar(calendar_path) if calendar_path else None
+        self.calendar = ExchangeCalendar(calendar_path) if calendar_path else None
 
     def evaluate(self, intent: SignalIntent, quote: MarketQuote, now: datetime) -> RiskDecision:
         account = self.ledger.account(self.config.account_id)
@@ -56,9 +54,10 @@ class RiskEngine:
         check("quote_fresh", -2 <= age <= self.config.matching.max_quote_age_seconds,
               f"行情时延 {age:.1f} 秒超过限制")
         if self.calendar is not None:
-            check("trading_calendar", self.calendar.available and self.calendar.is_trading_day(quote.timestamp.date()),
-                  "正式交易日历不可用或行情日期不是交易日")
-        check("trading_session", in_continuous_session(quote.timestamp), "不在连续竞价时段或不是工作日")
+            calendar_ok, calendar_detail = self.calendar.check(quote.timestamp.astimezone(SHANGHAI).date())
+            check("trading_calendar", calendar_ok, calendar_detail)
+        check("trading_session", in_continuous_session(quote.timestamp),
+              "不在连续竞价时段（9:30-11:30、13:00-14:57）或不是工作日")
         check("tradable", quote.tradable, "证券当前不可交易")
         check("lot_size", intent.side == OrderSide.SELL or intent.quantity % self.config.lot_size == 0,
               f"买入数量必须是 {self.config.lot_size} 股整数倍")
@@ -71,6 +70,7 @@ class RiskEngine:
               f"订单金额 {order_value} 超过单笔上限 {self.config.max_order_value}")
 
         if intent.side == OrderSide.BUY:
+            check("ask_side", quote.has_ask, "卖盘为空（可能涨停封板），买单无法成交")
             commission, stamp_tax, transfer_fee = calculate_fees(self.config.fees, "BUY", order_value)
             estimated_fee = money(commission + stamp_tax + transfer_fee)
             check("cash", account["cash"] - order_value - estimated_fee >= self.config.min_cash_buffer,
@@ -80,6 +80,7 @@ class RiskEngine:
             check("max_total_exposure", current_exposure + order_value <= self.config.max_total_exposure,
                   "买入后总持仓超过上限")
         else:
+            check("bid_side", quote.has_bid, "买盘为空（可能跌停封板），卖单无法成交")
             check("available_position", position["available_quantity"] >= intent.quantity,
                   "可用持仓不足，可能触发 T+1 或超卖")
 

@@ -23,6 +23,7 @@ EXAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "paper_trading.example.json"
 RUNTIME_DIR = PROJECT_ROOT / "runtime" / "paper_trading"
 DB_PATH = RUNTIME_DIR / "paper_trading.sqlite3"
 CALENDAR_PATH = PROJECT_ROOT / "data" / "trading_calendar.csv"
+EXCHANGE_CALENDAR_PATH = PROJECT_ROOT / "data" / "trade_dates.csv"
 HISTORY_DIR = PROJECT_ROOT / "data" / "paper_closes"
 sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -30,9 +31,10 @@ from paper_trading.config import PaperConfig, load_config  # noqa: E402
 from paper_trading.broker import StaticQuoteBroker  # noqa: E402
 from paper_trading.fees import load_fee_config  # noqa: E402
 from paper_trading.ledger import PaperLedger  # noqa: E402
-from paper_trading.market_data import TencentPaperQuoteBroker  # noqa: E402
+from paper_trading.market_data import paper_quote_broker  # noqa: E402
 from paper_trading.models import OrderSide, SignalIntent  # noqa: E402
 from paper_trading.order_service import OrderService  # noqa: E402
+from paper_trading.quote_store import collector_status  # noqa: E402
 from paper_trading.reconciliation import reconcile  # noqa: E402
 from paper_trading.report_adapter import paper_account_summary  # noqa: E402
 from paper_trading.snapshots import SnapshotCatchup  # noqa: E402
@@ -126,6 +128,7 @@ def dashboard_state(csrf_token: str) -> dict[str, Any]:
         "latestQuote": None if latest_quote is None else dict(latest_quote),
         "reconciliation": reconcile(ledger, config.account_id),
         "snapshotCatchup": snapshot_catchup,
+        "collectorStatus": collector_status(DB_PATH),
     }
 
 
@@ -160,8 +163,8 @@ def service() -> tuple[PaperConfig, PaperLedger, OrderService]:
     SnapshotCatchup(ledger, config.account_id, CALENDAR_PATH, HISTORY_DIR).catch_up(
         ledger.latest_market_date(), now_local(),
     )
-    broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
-    return config, ledger, OrderService(config, ledger, broker, RUNTIME_DIR, CALENDAR_PATH)
+    broker = paper_quote_broker(DB_PATH, config.quote_failover_failures)
+    return config, ledger, OrderService(config, ledger, broker, RUNTIME_DIR, EXCHANGE_CALENDAR_PATH)
 
 
 def approval_confirmation_valid(intent: SignalIntent, confirmation: Any) -> bool:
@@ -220,7 +223,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             try:
                 symbol = parse_qs(parsed.query).get("symbol", [""])[0]
                 threshold = load_config(CONFIG_PATH).quote_failover_failures if CONFIG_PATH.exists() else 3
-                quote = TencentPaperQuoteBroker(failure_threshold=threshold).latest_quote(symbol)
+                quote = paper_quote_broker(DB_PATH, threshold).latest_quote(symbol)
                 self.send_json(quote.to_dict())
             except Exception as exc:
                 self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
@@ -301,7 +304,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                     if execution_catchup["unresolved"]:
                         raise ValueError("存在无法补齐的历史净值缺口，拒绝执行成交")
                     orders = OrderService(
-                        config, ledger, StaticQuoteBroker(quote), RUNTIME_DIR, CALENDAR_PATH,
+                        config, ledger, StaticQuoteBroker(quote), RUNTIME_DIR, EXCHANGE_CALENDAR_PATH,
                     )
                     result = orders.execute(intent_id, when)
                 elif action == "kill":

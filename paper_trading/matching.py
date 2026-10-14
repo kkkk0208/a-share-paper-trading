@@ -29,7 +29,7 @@ class PaperMatcher:
             return None
 
         if intent.side == OrderSide.BUY:
-            if quote.ask > intent.limit_price or quote.ask_size <= 0:
+            if not quote.has_ask or quote.ask > intent.limit_price:
                 return None
             if Decimal(quote.ask_size) < Decimal(intent.quantity) * self.config.matching.min_depth_ratio:
                 return None
@@ -37,7 +37,7 @@ class PaperMatcher:
             fill_price = min(intent.limit_price, money(raw_price))
             available = quote.ask_size
         else:
-            if quote.bid < intent.limit_price or quote.bid_size <= 0:
+            if not quote.has_bid or quote.bid < intent.limit_price:
                 return None
             if Decimal(quote.bid_size) < Decimal(intent.quantity) * self.config.matching.min_depth_ratio:
                 return None

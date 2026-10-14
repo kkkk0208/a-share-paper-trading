@@ -1,26 +1,23 @@
 from __future__ import annotations
 
-import re
-import urllib.request
+import time as _time
 import uuid
 from abc import ABC, abstractmethod
-from datetime import datetime
+from dataclasses import replace
+from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
+from typing import Callable, Protocol
 from zoneinfo import ZoneInfo
 
-from tencent_quote import fetch_raw, normalize_symbol, parse
-
 from .broker import PaperBroker
-from .models import MarketQuote, money
+from .models import MarketQuote
+from .quote_quality import Phase, session_phase
+from .quote_sources import BatchQuoteSource, SinaSource, TencentSource
+from .quote_store import SqliteLimitCache, latest_stored_quote
 
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
-
-
-def _decimal(value: str | None, field: str, source: str) -> Decimal:
-    if value in (None, ""):
-        raise ValueError(f"{source} quote missing {field}")
-    return money(value)
 
 
 class QuoteProvider(ABC):
@@ -31,90 +28,61 @@ class QuoteProvider(ABC):
         raise NotImplementedError
 
 
-class TencentQuoteProvider(QuoteProvider):
-    def latest_quote(self, symbol: str) -> MarketQuote:
-        code = symbol.split(".", 1)[0]
-        rows = parse(fetch_raw([normalize_symbol(code)]))
-        if len(rows) != 1:
-            raise RuntimeError(f"expected one Tencent quote for {symbol}, got {len(rows)}")
-        row = rows[0]
-        fields = row.raw_fields
-        if not row.timestamp:
-            raise ValueError("Tencent quote missing timestamp")
-        timestamp = datetime.strptime(row.timestamp, "%Y%m%d%H%M%S").replace(tzinfo=SHANGHAI)
-        last = _decimal(row.last, "last", "Tencent")
-        bid = _decimal(fields.get("field_9"), "bid1", "Tencent")
-        ask = _decimal(fields.get("field_19"), "ask1", "Tencent")
-        bid_levels = tuple(
-            (_decimal(fields.get(f"field_{9 + level * 2}"), f"bid{level + 1}", "Tencent"),
-             int(Decimal(fields.get(f"field_{10 + level * 2}") or "0") * 100))
-            for level in range(5) if fields.get(f"field_{9 + level * 2}")
-        )
-        ask_levels = tuple(
-            (_decimal(fields.get(f"field_{19 + level * 2}"), f"ask{level + 1}", "Tencent"),
-             int(Decimal(fields.get(f"field_{20 + level * 2}") or "0") * 100))
-            for level in range(5) if fields.get(f"field_{19 + level * 2}")
-        )
-        return MarketQuote(
-            symbol=symbol, timestamp=timestamp, last=last, bid=bid, ask=ask,
-            bid_size=bid_levels[0][1], ask_size=ask_levels[0][1],
-            source="tencent_level1_snapshot", tradable=bool(bid > 0 and ask > 0),
-            limit_up=_decimal(fields.get("limit_up"), "limit_up", "Tencent") if fields.get("limit_up") else None,
-            limit_down=_decimal(fields.get("limit_down"), "limit_down", "Tencent") if fields.get("limit_down") else None,
-            snapshot_id=str(uuid.uuid4()), bid_levels=bid_levels, ask_levels=ask_levels,
-        )
-
-
-class SinaQuoteProvider(QuoteProvider):
-    endpoint = "https://hq.sinajs.cn/list={symbol}"
+class SourceQuoteProvider(QuoteProvider):
+    def __init__(self, source: BatchQuoteSource) -> None:
+        self.source = source
 
     def latest_quote(self, symbol: str) -> MarketQuote:
-        code = normalize_symbol(symbol.split(".", 1)[0])
-        request = urllib.request.Request(
-            self.endpoint.format(symbol=code),
-            headers={"User-Agent": "Mozilla/5.0", "Referer": "https://finance.sina.com.cn/"},
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            text = response.read().decode("gbk", errors="replace")
-        match = re.search(r'="(.*)"', text)
-        if not match:
-            raise RuntimeError(f"Sina quote missing payload for {symbol}")
-        fields = match.group(1).split(",")
-        if len(fields) < 33:
-            raise RuntimeError(f"Sina quote has {len(fields)} fields for {symbol}")
-        timestamp = datetime.strptime(f"{fields[30]} {fields[31]}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=SHANGHAI)
-        bid_levels = tuple(
-            (_decimal(fields[11 + level * 2], f"bid{level + 1}", "Sina"), int(fields[10 + level * 2] or 0))
-            for level in range(5) if fields[11 + level * 2]
-        )
-        ask_levels = tuple(
-            (_decimal(fields[21 + level * 2], f"ask{level + 1}", "Sina"), int(fields[20 + level * 2] or 0))
-            for level in range(5) if fields[21 + level * 2]
-        )
-        bid = _decimal(fields[6], "bid1", "Sina")
-        ask = _decimal(fields[7], "ask1", "Sina")
-        status = fields[32].strip()
-        return MarketQuote(
-            symbol=symbol, timestamp=timestamp, last=_decimal(fields[3], "last", "Sina"),
-            bid=bid, ask=ask, bid_size=bid_levels[0][1], ask_size=ask_levels[0][1],
-            source="sina_level1_snapshot", tradable=status == "00" and bid > 0 and ask > 0,
-            limit_up=None, limit_down=None, snapshot_id=str(uuid.uuid4()),
-            bid_levels=bid_levels, ask_levels=ask_levels,
-        )
+        batch = self.source.fetch([symbol])
+        parsed = batch.quotes.get(symbol)
+        if parsed is None:
+            reason = batch.errors.get(symbol, "unknown error")
+            raise RuntimeError(f"{self.source.name} quote unavailable for {symbol}: {reason}")
+        return parsed.to_market_quote(snapshot_id=str(uuid.uuid4()))
+
+
+class TencentQuoteProvider(SourceQuoteProvider):
+    def __init__(self, source: BatchQuoteSource | None = None) -> None:
+        super().__init__(source or TencentSource())
+
+
+class SinaQuoteProvider(SourceQuoteProvider):
+    def __init__(self, source: BatchQuoteSource | None = None) -> None:
+        super().__init__(source or SinaSource())
 
 
 class FailoverQuoteProvider(QuoteProvider):
-    def __init__(self, primary: QuoteProvider, secondary: QuoteProvider, failure_threshold: int = 3) -> None:
+    """Primary first. After `failure_threshold` consecutive errors use the secondary,
+    and try the primary again every `recovery_seconds` so the switch is not permanent."""
+
+    def __init__(
+        self, primary: QuoteProvider, secondary: QuoteProvider, failure_threshold: int = 3,
+        *, recovery_seconds: float = 60.0, clock: Callable[[], float] = _time.monotonic,
+    ) -> None:
         if failure_threshold <= 0:
             raise ValueError("failure_threshold must be positive")
         self.primary = primary
         self.secondary = secondary
         self.failure_threshold = failure_threshold
+        self.recovery_seconds = recovery_seconds
+        self._clock = clock
         self.primary_failures = 0
         self.using_secondary = False
+        self._secondary_since: float | None = None
 
     def latest_quote(self, symbol: str) -> MarketQuote:
         primary_error: Exception | None = None
+        if self.using_secondary and self._clock() - (self._secondary_since or 0.0) >= self.recovery_seconds:
+            try:
+                quote = self.primary.latest_quote(symbol)
+            except Exception as exc:
+                primary_error = exc
+                self._secondary_since = self._clock()
+            else:
+                self.using_secondary = False
+                self.primary_failures = 0
+                self._secondary_since = None
+                return quote
         if not self.using_secondary:
             try:
                 quote = self.primary.latest_quote(symbol)
@@ -128,6 +96,7 @@ class FailoverQuoteProvider(QuoteProvider):
                         f"primary quote failed ({self.primary_failures}/{self.failure_threshold}); fail closed"
                     ) from exc
                 self.using_secondary = True
+                self._secondary_since = self._clock()
         try:
             return self.secondary.latest_quote(symbol)
         except Exception as secondary_error:
@@ -135,18 +104,66 @@ class FailoverQuoteProvider(QuoteProvider):
             raise RuntimeError(f"all quote providers failed; fail closed: {detail}") from secondary_error
 
 
-_DEFAULT_PROVIDERS: dict[int, FailoverQuoteProvider] = {}
+class LimitPriceCache(Protocol):
+    def get(self, symbol: str, trade_date: date) -> tuple[Decimal, Decimal] | None: ...
+
+    def put(self, symbol: str, trade_date: date, limit_up: Decimal, limit_down: Decimal, source: str) -> bool: ...
+
+
+class MemoryLimitCache:
+    def __init__(self) -> None:
+        self._values: dict[tuple[str, date], tuple[Decimal, Decimal]] = {}
+
+    def get(self, symbol: str, trade_date: date) -> tuple[Decimal, Decimal] | None:
+        return self._values.get((symbol, trade_date))
+
+    def put(self, symbol: str, trade_date: date, limit_up: Decimal, limit_down: Decimal, source: str) -> bool:
+        key = (symbol, trade_date)
+        if key in self._values:
+            return False
+        self._values[key] = (limit_up, limit_down)
+        return True
+
+
+class LimitFillingProvider(QuoteProvider):
+    """Price limits do not change during a trading day. Remember them from a source that
+    reports them (Tencent) and reuse them for one that does not (Sina). Nothing is
+    estimated: without a same-day value the quote keeps None and risk still fails closed."""
+
+    def __init__(self, inner: QuoteProvider, cache: LimitPriceCache) -> None:
+        self.inner = inner
+        self.cache = cache
+
+    def latest_quote(self, symbol: str) -> MarketQuote:
+        quote = self.inner.latest_quote(symbol)
+        trade_date = quote.timestamp.astimezone(SHANGHAI).date()
+        if quote.limit_up is not None and quote.limit_down is not None:
+            if session_phase(quote.timestamp) not in {Phase.CLOSED, Phase.PRE_MARKET}:
+                self.cache.put(symbol, trade_date, quote.limit_up, quote.limit_down, quote.source)
+            return quote
+        cached = self.cache.get(symbol, trade_date)
+        if cached is None:
+            return quote
+        return replace(quote, limit_up=cached[0], limit_down=cached[1], source=f"{quote.source}+cached_limits")
+
+
+_DEFAULT_PROVIDERS: dict[tuple[int, str | None], QuoteProvider] = {}
 
 
 class ResilientPaperQuoteBroker(PaperBroker):
     """External snapshots plus local matching; it cannot route real orders."""
 
-    def __init__(self, provider: QuoteProvider | None = None, failure_threshold: int = 3) -> None:
+    def __init__(
+        self, provider: QuoteProvider | None = None, failure_threshold: int = 3,
+        limit_cache: LimitPriceCache | None = None,
+    ) -> None:
         if provider is None:
-            provider = _DEFAULT_PROVIDERS.setdefault(
-                failure_threshold,
-                FailoverQuoteProvider(TencentQuoteProvider(), SinaQuoteProvider(), failure_threshold),
-            )
+            key = (failure_threshold, getattr(limit_cache, "cache_key", None))
+            provider = _DEFAULT_PROVIDERS.get(key)
+            if provider is None:
+                failover = FailoverQuoteProvider(TencentQuoteProvider(), SinaQuoteProvider(), failure_threshold)
+                provider = LimitFillingProvider(failover, limit_cache or MemoryLimitCache())
+                _DEFAULT_PROVIDERS[key] = provider
         self.provider = provider
 
     def latest_quote(self, symbol: str) -> MarketQuote:
@@ -157,3 +174,37 @@ class ResilientPaperQuoteBroker(PaperBroker):
 
 
 TencentPaperQuoteBroker = ResilientPaperQuoteBroker
+
+
+class StoreFirstQuoteBroker(PaperBroker):
+    """Use the newest tick the collector stored when it is fresh; otherwise fetch live.
+
+    With the collector running, trading reads the same data that is being recorded,
+    and source failover state lives in one long-running process.
+    """
+
+    def __init__(
+        self, db_path: str | Path, live: PaperBroker, max_age_seconds: float = 6.0,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.db_path = Path(db_path)
+        self.live = live
+        self.max_age_seconds = max_age_seconds
+        self._clock = clock or (lambda: datetime.now().astimezone())
+
+    def latest_quote(self, symbol: str) -> MarketQuote:
+        stored = latest_stored_quote(self.db_path, symbol)
+        if stored is not None:
+            age = (self._clock() - stored.timestamp).total_seconds()
+            if -2 <= age <= self.max_age_seconds:
+                return stored
+        return self.live.latest_quote(symbol)
+
+    def adapter_name(self) -> str:
+        return "deterministic"
+
+
+def paper_quote_broker(db_path: str | Path, failure_threshold: int = 3) -> PaperBroker:
+    """Default broker for the CLI and dashboard: collector ticks first, live Tencent/Sina second."""
+    live = ResilientPaperQuoteBroker(failure_threshold=failure_threshold, limit_cache=SqliteLimitCache(db_path))
+    return StoreFirstQuoteBroker(db_path, live)

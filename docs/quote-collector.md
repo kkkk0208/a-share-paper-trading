@@ -1,0 +1,70 @@
+# 实时行情采集
+
+采集进程只记录行情，不下单。交易时段每 3 秒向腾讯发一次合并请求，腾讯没返回的标的再问新浪。每条快照先检查，合格的存进 `market_snapshots`，不合格的和接口故障写进 `quote_events`。不估算、不补值、不用旧值顶替。
+
+免费接口能拿到的是交易所约每 3 秒一次的 Level 1 快照（五档）。腾讯和新浪都是非官方接口，没有服务保证，可能限流或改格式。
+
+## 一次性准备
+
+1. 指定 Python（只需一次，之后新开的终端生效）：`setx A_SHARE_PYTHON "C:\path\to\python.exe"`。不设置时依次使用项目里的 `.venv`、PATH 上的 `python`。
+2. 下载交易日历：`.\scripts\quote_collector.ps1 sync-calendar`。生成 `data/trade_dates.csv`，包含当年剩余的交易日。需要 akshare（`requirements-backtesting.txt`）。每年 12 月交易所公布下一年休市安排后再运行一次。
+
+交易风控现在用这个文件判断是否交易日。日期超出文件范围时 fail closed，并提示重新运行 `sync-calendar`。`data/trading_calendar.csv` 仍只用于净值快照的基准收盘价。
+
+## 每天运行
+
+```powershell
+.\scripts\quote_collector.ps1 run
+```
+
+开盘前启动即可：9:15 之前等待，9:15 到 11:30、13:00 到 15:05 采集，收盘后自动退出；周末和休市日直接退出。标的取 `config/paper_trading.json` 里的白名单和基准，可用 `--extra-symbol 600000.SH` 追加，或用 `--symbol` 完全指定。
+
+其它命令：
+
+- `once`：马上采集一轮，不看时段，用来检查网络和解析。加 `--dry-run` 不写数据库。
+- `report --date 2026-10-15 --out runtime\paper_trading\reports\2026-10-15.json`：当天数据质量报告，`--out` 可选。全部通过时退出码为 0，否则为 2。
+- `capture --symbols 002195.SZ 000300.SH --label continuous`：保存两个源的原始返回到 `tests/fixtures/quotes/real/`，供解析测试使用。
+
+## 和交易的关系
+
+- CLI 和看板默认先读采集进程存下的最新快照（6 秒以内），没有才去网上实时抓。采集进程开着时，交易和录制用的是同一份数据。
+- 涨停时卖盘为空、跌停时买盘为空，现在都是正常行情：涨停可以卖，跌停可以买；对面没有挂单的一侧会被风控拒绝并说明原因。
+- 14:57 到 15:00 是收盘集合竞价，不再算作连续竞价。
+- 看板里的实时抓取连续失败 3 次切到新浪，之后每 60 秒重试腾讯，恢复后切回。采集进程则是每一轮都先问腾讯，缺的再问新浪。新浪没有涨跌停价，使用当天从腾讯记下的值（`daily_limits` 表，标记 `cached_limits`）。当天没有记录时保持缺失，风控照样拒绝。
+
+## 数据存在哪里
+
+都在 `runtime/paper_trading/paper_trading.sqlite3`：
+
+| 表 | 内容 |
+| --- | --- |
+| `market_snapshots` | 合格快照。`payload_json.collector` 里有来源、时段、质量标记、昨收、成交量等；每只股票每天第一条和有警告的快照保留原始返回 |
+| `quote_events` | 被拒快照、接口错误与恢复、断流与恢复、涨跌停状态变化、两个源的价格核对 |
+| `daily_limits` | 每只股票每天的涨跌停价，第一次看到的值为准 |
+| `collector_status` | 采集进程最近一轮的状态 |
+
+三只标的录一天大约 15 MB。
+
+## 质量标记
+
+| 标记 | 级别 | 含义 |
+| --- | --- | --- |
+| `not_today` | 拒收 | 行情日期不是今天（停牌或开盘前的旧数据） |
+| `non_monotonic` | 拒收 | 时间比上一条早（常见于切换来源时） |
+| `crossed_book` | 拒收 | 连续竞价时买一高于卖一 |
+| `price_outside_limits` | 拒收 | 最新价超出涨跌停价 |
+| `stale` | 警告 | 行情比本机时间旧 30 秒以上 |
+| `clock_skew` | 警告 | 行情时间比本机时间晚 3 秒以上，说明电脑时钟慢了 |
+| `locked_book` | 警告 | 连续竞价时买一等于卖一 |
+| `one_sided_book` | 警告 | 一侧为空，但不在涨跌停价 |
+| `missing_limits` | 警告 | 没有涨跌停价，交易会被拒绝 |
+| `large_jump` | 警告 | 和上一条相比变动超过 5% |
+| `limit_up_sealed` / `limit_down_sealed` | 信息 | 涨停或跌停封板 |
+| `no_book` | 信息 | 两侧都为空 |
+| `cached_limits` | 信息 | 涨跌停价来自当天缓存 |
+
+## 还需要用真实数据确认
+
+解析按通常的字段位置写成（腾讯 `~` 分隔：3 最新价、9 到 18 买盘、19 到 28 卖盘、30 时间、47 涨停价、48 跌停价，盘口单位为手；新浪 `,` 分隔：盘口单位为股、30 和 31 为日期时间、32 为状态）。停牌股、集合竞价时的盘口、指数行情的具体样子都需要用 `capture` 抓真实样本确认，`tests/test_real_quote_samples.py` 会自动检查。
+
+电脑时钟要开自动同步：现有规则下，时钟慢 2 秒以上或快 10 秒以上，所有行情都会被判为过期。`report` 里的 `latency_seconds` 可以看出时钟偏差。

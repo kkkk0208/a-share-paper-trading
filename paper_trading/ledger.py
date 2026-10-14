@@ -515,9 +515,13 @@ class PaperLedger:
             ).fetchone()
         return int(row["count"])
 
-    def save_quote(self, quote: MarketQuote, now: datetime | None = None) -> str:
+    def save_quote(
+        self, quote: MarketQuote, now: datetime | None = None, extra: dict[str, Any] | None = None,
+    ) -> str:
         snapshot_id = quote.snapshot_id or str(uuid.uuid4())
         payload = quote.to_dict() | {"snapshot_id": snapshot_id}
+        if extra:
+            payload["collector"] = extra
         with self.transaction() as con:
             con.execute(
                 "INSERT OR IGNORE INTO market_snapshots(snapshot_id,symbol,timestamp,last,bid,ask,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?)",

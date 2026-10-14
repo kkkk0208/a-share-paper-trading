@@ -12,7 +12,7 @@ from typing import Any
 from .broker import StaticQuoteBroker
 from .config import load_config
 from .ledger import PaperLedger
-from .market_data import TencentPaperQuoteBroker
+from .market_data import paper_quote_broker
 from .models import MarketQuote, OrderSide, SignalIntent
 from .order_service import OrderService
 from .performance import calculate_performance
@@ -38,9 +38,13 @@ def print_json(value: Any) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, default=json_default))
 
 
-def load_quote(path: str | None, symbol: str, failure_threshold: int = 3) -> tuple[Any, MarketQuote]:
+def load_quote(
+    path: str | None, symbol: str, failure_threshold: int = 3, db_path: str | Path | None = None,
+) -> tuple[Any, MarketQuote]:
     if not path:
-        broker = TencentPaperQuoteBroker(failure_threshold=failure_threshold)
+        if db_path is None:
+            raise ValueError("db_path is required for live quotes")
+        broker = paper_quote_broker(db_path, failure_threshold)
         return broker, broker.latest_quote(symbol)
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     quote = MarketQuote(**data)
@@ -117,7 +121,10 @@ def main(argv: list[str] | None = None) -> int:
     runtime.mkdir(parents=True, exist_ok=True)
     when = now_local()
     project_root = Path(__file__).resolve().parent.parent
+    # Benchmark closes from history (snapshots and perf) and the forward-looking exchange
+    # calendar (risk) are different files: history never contains today.
     calendar_path = project_root / "data" / "trading_calendar.csv"
+    exchange_calendar_path = project_root / "data" / "trade_dates.csv"
     history_dir = project_root / "data" / "paper_closes"
 
     if args.command == "init":
@@ -188,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         print_json(ledger.cancel_intent(args.intent_id, args.reason, when))
         return 0
     if args.command == "snapshot":
-        broker = TencentPaperQuoteBroker(failure_threshold=config.quote_failover_failures)
+        broker = paper_quote_broker(args.db, config.quote_failover_failures)
         current_prices: dict[str, Decimal] = {}
         for position in ledger.positions(config.account_id):
             quote = broker.latest_quote(position["symbol"])
@@ -229,9 +236,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "propose":
         intent = load_intent(args.intent)
-        broker, quote = load_quote(args.quote, intent.symbol, config.quote_failover_failures)
+        broker, quote = load_quote(args.quote, intent.symbol, config.quote_failover_failures, args.db)
         snapshots.catch_up(quote.timestamp.date(), when, {quote.symbol: quote.last})
-        service = OrderService(config, ledger, broker, runtime, calendar_path)
+        service = OrderService(config, ledger, broker, runtime, exchange_calendar_path)
         print_json(service.propose(intent, quote, when))
         return 0
     if args.command in {"approve", "reject"}:
@@ -240,7 +247,7 @@ def main(argv: list[str] | None = None) -> int:
             timestamp=when,
             last="1", bid="1", ask="1", bid_size=0, ask_size=0,
             source="approval_only", tradable=False, limit_up="1", limit_down="1",
-        )), runtime, calendar_path)
+        )), runtime, exchange_calendar_path)
         if args.command == "approve":
             print_json(service.approve(args.intent_id, args.actor, args.note, when))
         else:
@@ -248,11 +255,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "execute":
         intent = ledger.get_intent(args.intent_id)
-        broker, quote = load_quote(getattr(args, "quote", None), intent.symbol, config.quote_failover_failures)
+        broker, quote = load_quote(getattr(args, "quote", None), intent.symbol, config.quote_failover_failures, args.db)
         execution_catchup = snapshots.catch_up(quote.timestamp.date(), when, {quote.symbol: quote.last})
         if execution_catchup["unresolved"]:
             raise ValueError("存在无法补齐的历史净值缺口，拒绝在错误继续传播前执行成交")
-        service = OrderService(config, ledger, broker, runtime, calendar_path)
+        service = OrderService(config, ledger, broker, runtime, exchange_calendar_path)
         print_json(service.execute(args.intent_id, when))
         return 0
     return 1

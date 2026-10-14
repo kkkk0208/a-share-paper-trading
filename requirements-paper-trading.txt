@@ -1,4 +1,5 @@
-# Core MVP uses only Python 3.12 standard library.
+# Core MVP and the quote collector use only the Python 3.12 standard library.
+# `collector sync-calendar` needs akshare (see requirements-backtesting.txt).
 # Optional integration, install only after core acceptance tests pass:
 # vnpy==4.4.0
 # vnpy_paperaccount==1.1.0

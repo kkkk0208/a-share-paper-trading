@@ -8,4 +8,6 @@
 
 使用方法、风险边界和命令清单见 [`docs/paper-trading-quickstart.md`](docs/paper-trading-quickstart.md)。
 
+实时行情采集（交易时段每 3 秒记录一次快照，供模拟交易和以后回放使用）见 [`docs/quote-collector.md`](docs/quote-collector.md)。
+
 独立策略回测已经拆成单独模块，说明和示例命令见 [`docs/backtesting.md`](docs/backtesting.md)。当前 MA5/MA20 规则只用于验证框架，不代表正式投资策略。

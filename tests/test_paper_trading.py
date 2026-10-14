@@ -336,8 +336,9 @@ class PaperTradingTests(unittest.TestCase):
                 cfg, ledger, StaticQuoteBroker(tick), root, root / "missing-calendar.csv",
             )
             result = service.propose(intent("calendar-missing", "BUY", created), tick, tick.timestamp)
-            self.assertIn(
-                "正式交易日历不可用或行情日期不是交易日",
+            self.assertEqual(result["decision"], "REJECTED")
+            self.assertTrue(
+                any("交易日历" in reason and "sync-calendar" in reason for reason in result["rejection_reasons"]),
                 result["rejection_reasons"],
             )
 
