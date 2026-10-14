@@ -9,6 +9,8 @@
 1. 指定 Python（只需一次，之后新开的终端生效）：`setx A_SHARE_PYTHON "C:\path\to\python.exe"`。不设置时依次使用项目里的 `.venv`、PATH 上的 `python`。
 2. 下载交易日历：`.\scripts\quote_collector.ps1 sync-calendar`。生成 `data/trade_dates.csv`，包含当年剩余的交易日。需要 akshare（`requirements-backtesting.txt`）。每年 12 月交易所公布下一年休市安排后再运行一次。
 
+2026-10-14 已在 Windows 实机同步成功：共 8,797 个交易日，范围为 1990-12-19 至 2026-12-31。抽查 2026-01-01、春节 2 月 16 日至 20 日、国庆 10 月 1 日至 7 日均不在日历，10 月 8 日、10 月 9 日和 10 月 14 日在日历。文件属于本机运行数据，由 `.gitignore` 排除，不提交到仓库。
+
 交易风控现在用这个文件判断是否交易日。日期超出文件范围时 fail closed，并提示重新运行 `sync-calendar`。`data/trading_calendar.csv` 仍只用于净值快照的基准收盘价。
 
 ## 每天运行
