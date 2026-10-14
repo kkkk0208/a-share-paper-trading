@@ -23,6 +23,16 @@
 
 本机已注册 Windows 计划任务 `AShareQuoteCollector`：工作日 9:05 运行，允许电池供电、唤醒电脑并在错过启动时间后补跑，重复实例会被忽略。任务为两个行情域名设置 `NO_PROXY`，日志追加到 `runtime/paper_trading/collector.log`。2026-10-14 收盘后手动触发的退出码为 0，下一次计划运行时间为 2026-10-15 09:05。
 
+剩余样本和每日报告的可复现设置：
+
+```powershell
+.\scripts\schedule_quote_acceptance.ps1 -SampleDate 2026-10-15
+```
+
+此脚本注册三个一次性样本任务（指定日期 9:20、10:00、14:58，标的为 002195.SZ、002815.SZ、000300.SH），以及工作日 15:10 的 `AShareQuoteQualityReport`。样本任务不会补跑错过的时段；日期/阶段校验也会拒绝手动误触发。报告写入 `runtime/paper_trading/reports/YYYY-MM-DD.json`，日志分别为 `runtime/paper_trading/acceptance-<phase>.log` 和 `acceptance-report.log`。所有任务使用当前用户的交互式登录，必须保持 Windows 登录且接通电源；锁屏可运行，注销后不会运行。脚本支持 `-WhatIf` 预览和 `-PythonPath` 显式指定解释器，也会读取已保存的用户 `A_SHARE_PYTHON`，注册前检查 Python 能启动。
+
+2026-10-14 实机验证：误触发次日样本任务得到退出码 2，未产生错标样本；报告任务生成 UTF-8 JSON，并因当天未录制完整行情返回质量不通过（退出码 2）。这代表报告流程已跑通，不代表行情验收通过。需连续 3 至 5 个交易日按覆盖率、间隔、时延和双源差异逐项验收。
+
 其它命令：
 
 - `once`：马上采集一轮，不看时段，用来检查网络和解析。加 `--dry-run` 不写数据库。
