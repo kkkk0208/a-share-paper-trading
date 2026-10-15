@@ -1,11 +1,12 @@
 """Quote layer tests: parsers, one-sided books, session phases, calendar and providers.
 
-Raw responses here are synthetic, built from the documented field layout. Real
-captures live in tests/fixtures/quotes/real/ and are checked by
-tests/test_real_quote_samples.py."""
+Synthetic responses exercise edge cases; pinned real captures also verify
+auction books and five-level share units. Captures live in
+tests/fixtures/quotes/real/ and have additional checks in test_real_quote_samples.py."""
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -75,6 +76,21 @@ def calendar_file(root: Path, days: list[date] | None = None) -> Path:
     return path
 
 
+def real_session(phase: str, source: str):
+    """Pin assertions to the scheduled captures, not a relabelled later quote."""
+    stamps = {"opening_call": "092002", "continuous": "100003", "closing_call": "145802"}
+    fixtures = Path(__file__).parent / "fixtures" / "quotes" / "real"
+    stem = f"20261015_{stamps[phase]}_{phase}_{source}"
+    meta = json.loads((fixtures / f"{stem}.json").read_text(encoding="utf-8"))
+    captured = datetime.fromisoformat(meta["captured_at"])
+    assert meta["error"] is None
+    assert meta["label"] == meta["phase"] == session_phase(captured).value == phase
+    assert captured.date() == DAY and captured.utcoffset() == timedelta(hours=8)
+    assert meta["file"] == f"{stem}.txt" and meta["source"] == source
+    parser = {"tencent": parse_tencent, "sina": parse_sina}[source]
+    return parser((fixtures / meta["file"]).read_text(encoding="utf-8"), meta["symbols"], captured)
+
+
 class SymbolTests(unittest.TestCase):
     def test_suffix_is_kept_so_indices_are_not_confused(self):
         self.assertEqual(to_vendor_code("000300.SH"), "sh000300")
@@ -88,6 +104,70 @@ class SymbolTests(unittest.TestCase):
 
 class ParserTests(unittest.TestCase):
     fetched = at(10, 0, 4)
+
+    def test_real_opening_call_has_equal_price_single_level_book(self):
+        batch = real_session("opening_call", "tencent")
+        for symbol, price, shares in ((STOCK, "5.90", 187900), (OTHER, "23.25", 1093900)):
+            with self.subTest(symbol=symbol):
+                quote = batch.quotes[symbol]
+                self.assertEqual(quote.timestamp, at(9, 20))
+                self.assertEqual(quote.bid_levels, ((Decimal(price), shares),))
+                self.assertEqual(quote.ask_levels, quote.bid_levels)
+                assessment = assess_quote(quote.to_market_quote(), now=at(9, 20, 2))
+                self.assertFalse(assessment.blocking)
+                self.assertNotIn(Flag.CROSSED_BOOK, assessment.flags)
+                self.assertFalse(in_continuous_session(quote.timestamp))
+
+    def test_real_continuous_five_levels_and_share_units_match_sources(self):
+        expected_bids = tuple((Decimal(price), shares) for price, shares in (
+            ("5.91", 1180900), ("5.90", 575000), ("5.89", 153100), ("5.88", 361000), ("5.87", 183700)))
+        expected_asks = tuple((Decimal(price), shares) for price, shares in (
+            ("5.92", 85800), ("5.93", 117300), ("5.94", 77000), ("5.95", 74700), ("5.96", 124000)))
+        for source in ("tencent", "sina"):
+            with self.subTest(source=source):
+                batch = real_session("continuous", source)
+                self.assertEqual(batch.errors, {})
+                quote = batch.quotes[STOCK]
+                self.assertEqual(quote.timestamp, at(10, 0))
+                self.assertEqual(quote.bid_levels, expected_bids)
+                self.assertEqual(quote.ask_levels, expected_asks)
+                sealed = batch.quotes[OTHER].to_market_quote()
+                self.assertEqual(sealed.last, Decimal("23.25"))
+                self.assertTrue(sealed.has_bid)
+                self.assertFalse(sealed.has_ask)
+
+    def test_real_closing_call_equal_books_are_not_continuous_trading(self):
+        expected = {"tencent": ((STOCK, "5.81", 182300), (OTHER, "23.25", 44400)),
+                    "sina": ((STOCK, "5.81", 213500), (OTHER, "23.25", 44400))}
+        for source, books in expected.items():
+            batch = real_session("closing_call", source)
+            for symbol, price, shares in books:
+                with self.subTest(source=source, symbol=symbol):
+                    quote = batch.quotes[symbol]
+                    self.assertEqual(quote.bid_levels, ((Decimal(price), shares),))
+                    self.assertEqual(quote.ask_levels, quote.bid_levels)
+                    self.assertEqual(session_phase(quote.timestamp), Phase.CLOSING_CALL)
+                    self.assertFalse(in_continuous_session(quote.timestamp))
+                    self.assertFalse(assess_quote(quote.to_market_quote(), now=at(14, 58, 3)).blocking)
+
+    def test_real_sina_opening_zero_last_is_explicitly_rejected(self):
+        batch = real_session("opening_call", "sina")
+        self.assertEqual(set(batch.quotes), {INDEX})
+        self.assertEqual(set(batch.errors), {STOCK, OTHER})
+        for reason in batch.errors.values():
+            self.assertIn("last price is missing or zero", reason)
+
+    def test_real_intraday_indices_have_no_stock_book_or_limits(self):
+        for phase in ("opening_call", "continuous", "closing_call"):
+            for source in ("tencent", "sina"):
+                with self.subTest(phase=phase, source=source):
+                    quote = real_session(phase, source).quotes[INDEX]
+                    self.assertEqual(quote.timestamp.date(), DAY)
+                    self.assertEqual(quote.bid_levels, ())
+                    self.assertEqual(quote.ask_levels, ())
+                    self.assertIsNone(quote.limit_up)
+                    self.assertIsNone(quote.limit_down)
+                    self.assertFalse(quote.tradable)
 
     def test_tencent_normal_quote_uses_shares_and_shanghai_time(self):
         text = f'v_sz002195="{tencent_body("002195", at(10, 0, 3))}";'

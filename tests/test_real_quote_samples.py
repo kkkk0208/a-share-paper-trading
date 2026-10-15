@@ -113,6 +113,24 @@ class RealQuoteSampleTests(unittest.TestCase):
                 self.assertFalse(quote.bid_levels or quote.ask_levels)
                 self.assertEqual(quote.status, "suspended")
 
+    def test_scheduled_intraday_samples_really_compare_in_every_phase(self):
+        # Require actual eligible comparisons in each scheduled phase. An old
+        # after-close pair (or one usable phase) cannot mask missing coverage.
+        for phase, expected_count in (("opening_call", 1), ("continuous", 3), ("closing_call", 2)):
+            samples = [sample for sample in self.samples
+                       if sample["captured"].date().isoformat() == "2026-10-15" and sample["label"] == phase]
+            with self.subTest(phase=phase):
+                self.assertEqual({sample["source"] for sample in samples}, {"tencent", "sina"})
+                self.assertEqual(len(samples), 2)
+                parsed = {sample["source"]: PARSERS[sample["source"]](
+                    sample["text"], sample["symbols"], sample["captured"]) for sample in samples}
+                a, b = parsed["tencent"].quotes, parsed["sina"].quotes
+                comparable = [symbol for symbol in set(a) & set(b)
+                              if abs((a[symbol].timestamp - b[symbol].timestamp).total_seconds()) <= 10]
+                self.assertEqual(len(comparable), expected_count)
+                for symbol in comparable:
+                    self.assertLess(abs(a[symbol].last - b[symbol].last) / a[symbol].last, 0.01)
+
 
 if __name__ == "__main__":
     unittest.main()

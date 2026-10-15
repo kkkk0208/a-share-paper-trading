@@ -1,0 +1,14 @@
+{
+  "source": "tencent",
+  "url": "https://qt.gtimg.cn/q=sz002195,sz002815,sh000300",
+  "symbols": [
+    "002195.SZ",
+    "002815.SZ",
+    "000300.SH"
+  ],
+  "captured_at": "2026-10-15T10:00:03.512597+08:00",
+  "phase": "continuous",
+  "label": "continuous",
+  "file": "20261015_100003_continuous_tencent.txt",
+  "error": null
+}

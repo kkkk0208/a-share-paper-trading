@@ -1,0 +1,14 @@
+{
+  "source": "tencent",
+  "url": "https://qt.gtimg.cn/q=sz002195,sz002815,sh000300",
+  "symbols": [
+    "002195.SZ",
+    "002815.SZ",
+    "000300.SH"
+  ],
+  "captured_at": "2026-10-15T09:20:02.432634+08:00",
+  "phase": "opening_call",
+  "label": "opening_call",
+  "file": "20261015_092002_opening_call_tencent.txt",
+  "error": null
+}
